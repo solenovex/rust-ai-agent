@@ -1,0 +1,1 @@
+pub const GPT_OSS_120B_MODEL: &str = "openai/gpt-oss-120b:free";
