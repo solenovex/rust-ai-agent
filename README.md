@@ -12,11 +12,7 @@ Each episode's code is tagged. Clone the repo and check out the tag for the epis
 
 每一期的代码都打了tag。克隆仓库后，切换到对应期数的tag即可：
 
-\`\`\`bash
-git clone https://github.com/solenovex/rust-ai-agent.git
-cd rust-ai-agent
-git checkout ep04
-\`\`\`
+```bash git clone https://github.com/solenovex/rust-ai-agent.git cd rust-ai-agent git checkout ep04 ```
 
 Replace `ep04` with the tag shown in the video description.
 
