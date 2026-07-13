@@ -1,7 +1,16 @@
 use crate::gaia::{
     models::{GaiaEvalResult, GaiaRow},
-    solver::{GAIA_PROMPT, solve_problem_with_retry},
+    solver::solve_problem_with_retry,
 };
+
+pub const GAIA_PROMPT: &str = r#"You are a general AI assistant. I will ask you a question.
+First, determine if you can solve this problem with your current capabilities and set "is_solvable" accordingly.
+If you can solve it, set "is_solvable" to true and provide your answer in "final_answer".
+If you cannot solve it, set "is_solvable" to false and explain why in "unsolvable_reason".
+Your final answer should be a number OR as few words as possible OR a comma-separated list of numbers and/or strings.
+If you are asked for a number, don't use a comma to write your number neither use units such as $ or percent sign unless specified otherwise.
+If you are asked for a string, don't use articles, neither abbreviations (e.g., for cities), and write the digits in plain text unless specified otherwise.
+If you are asked for a comma-separated list, apply the above rules depending on whether the element is a number or a string."#;
 
 fn is_correct(prediction: &str, answer: &str) -> bool {
     if prediction.is_empty() {
