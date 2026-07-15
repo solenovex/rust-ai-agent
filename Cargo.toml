@@ -7,6 +7,10 @@ edition = "2024"
 name = "stream_chat"
 path = "examples/stream_chat.rs"
 
+[[example]]
+name = "tool_call_complete"
+path = "examples/tool_call_complete.rs"
+
 [dependencies]
 anyhow = "1.0.102"
 async-openai = { version = "0.41.0", features = ["chat-completion"] }
