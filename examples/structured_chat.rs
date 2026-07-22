@@ -1,4 +1,4 @@
-use ai_agent::{constant::GPT_OSS_120B_MODEL, llm::{structured::chat_complete_structured}};
+use ai_agent::{constant::GPT_4O_MINI_MODEL, llm::{structured::chat_complete_structured}};
 use anyhow::Ok;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
@@ -13,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     let plan = chat_complete_structured(
-        GPT_OSS_120B_MODEL,
+        GPT_4O_MINI_MODEL,
         Some("你是一个全能的助手"),
         "我要去美加墨世界杯观看比赛，如果安排？",
     )

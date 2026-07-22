@@ -1,5 +1,5 @@
 use ai_agent::{
-    constant::GPT_OSS_120B_MODEL,
+    constant::GPT_4O_MINI_MODEL,
     llm::{
         semaphore::get_semaphore,
         stream::{chat_stream_with_retry},
@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("\n\n{prompt}");
                 let permit = get_semaphore().acquire().await?;
                 let output =
-                    chat_stream_with_retry(GPT_OSS_120B_MODEL, Some("你是一个全能助理"), prompt)
+                    chat_stream_with_retry(GPT_4O_MINI_MODEL, Some("你是一个全能助理"), prompt)
                         .await?;
                 drop(permit);
                 Ok::<_, anyhow::Error>((prompt, output))

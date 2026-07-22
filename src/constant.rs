@@ -1,1 +1,1 @@
-pub const GPT_OSS_120B_MODEL: &str = "openai/gpt-oss-120b";
+pub const GPT_4O_MINI_MODEL: &str = "openai/gpt-4o-mini";
