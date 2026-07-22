@@ -1,14 +1,8 @@
+use crate::tools::ToolBox;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessageArgs,
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionTools, CreateChatCompletionRequestArgs,
-};
-use tracing_subscriber::fmt::format;
-
-use crate::tools::{
-    ToolBox,
-    calculator::execute::{CalculatorArgs, calculator},
-    web_search::execute::{WebSearchArgs, search_web},
 };
 
 pub async fn chat_complete(
