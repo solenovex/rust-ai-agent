@@ -11,10 +11,15 @@ path = "examples/stream_chat.rs"
 name = "tool_call_complete"
 path = "examples/tool_call_complete.rs"
 
+[[example]]
+name = "simple_agent_loop"
+path = "examples/simple_agent_loop.rs"
+
 [dependencies]
 anyhow = "1.0.102"
 async-openai = { version = "0.41.0", features = ["chat-completion"] }
 async-stream = "0.3.6"
+async-trait = "0.1.91"
 backon = "1.6.0"
 dotenvy = "0.15.7"
 futures = "0.3.32"
