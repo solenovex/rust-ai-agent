@@ -12,7 +12,11 @@ use backon::{ExponentialBuilder, Retryable};
 use serde_json::Value;
 
 use crate::{
-    agent::callback::{AfterToolCallback, BeforeToolCallback, ToolCallView}, tools::ToolBox,
+    agent::{
+        callback::{AfterToolCallback, BeforeToolCallback, ToolCallView},
+        llm_request::{BeforeLlmCallback, LlmRequest},
+    },
+    tools::ToolBox,
 };
 
 use super::{
@@ -39,6 +43,7 @@ pub struct Agent {
     max_steps: u32,
     before_tool_callbacks: Vec<Arc<dyn BeforeToolCallback>>,
     after_tool_callbacks: Vec<Arc<dyn AfterToolCallback>>,
+    before_llm_callbacks: Vec<Arc<dyn BeforeLlmCallback>>,
 }
 
 impl Agent {
@@ -54,6 +59,7 @@ impl Agent {
             max_steps: 10,
             before_tool_callbacks: Vec::new(),
             after_tool_callbacks: Vec::new(),
+            before_llm_callbacks: Vec::new(),
         }
     }
 
@@ -106,7 +112,8 @@ impl Agent {
                 );
             }
 
-            let messages = self.build_messages(&context)?;
+            let llm_request = self.prepare_llm_request(&mut context).await;
+            let messages = self.build_messages(&llm_request)?;
 
             let request = CreateChatCompletionRequestArgs::default()
                 .model(self.model.clone())
@@ -202,7 +209,8 @@ impl Agent {
                 );
             }
 
-            let messages = self.build_messages(&context)?;
+            let llm_request = self.prepare_llm_request(&mut context).await;
+            let messages = self.build_messages(&llm_request)?;
 
             let request = CreateChatCompletionRequestArgs::default()
                 .model(self.model.clone())
@@ -273,6 +281,23 @@ impl Agent {
             self.execute_tool_calls(&mut context, &tool_calls).await;
             context.increment_step();
         }
+    }
+
+    async fn prepare_llm_request(&self, context: &mut ExecutionContext) -> LlmRequest {
+        let mut request = LlmRequest {
+            instructions: Vec::new(),
+            contents: context
+                .events
+                .iter()
+                .flat_map(|ev| ev.content.iter().cloned())
+                .collect(),
+        };
+
+        for cb in &self.before_llm_callbacks {
+            cb.call(context, &mut request).await;
+        }
+
+        request
     }
 
     fn record_tool_calls(
@@ -363,7 +388,7 @@ impl Agent {
                     break;
                 }
             }
-            
+
             result_items.push(ContentItem::ToolResult {
                 tool_call_id: function_call.id.clone(),
                 name: function_name.clone(),
@@ -381,7 +406,7 @@ impl Agent {
 
     fn build_messages(
         &self,
-        context: &ExecutionContext,
+        request: &LlmRequest,
     ) -> anyhow::Result<Vec<ChatCompletionRequestMessage>> {
         let mut messages = Vec::new();
 
@@ -394,64 +419,69 @@ impl Agent {
             );
         }
 
-        for event in &context.events {
-            for item in &event.content {
-                match item {
-                    ContentItem::Message { role, content } => {
-                        let message: ChatCompletionRequestMessage = if role == "user" {
-                            ChatCompletionRequestUserMessageArgs::default()
-                                .content(content.clone())
-                                .build()?
-                                .into()
-                        } else {
-                            ChatCompletionRequestAssistantMessageArgs::default()
-                                .content(content.clone())
-                                .build()?
-                                .into()
-                        };
-                        messages.push(message);
-                    }
-                    ContentItem::ToolCall {
-                        tool_call_id,
-                        name,
-                        arguments,
-                    } => {
-                        let tool_call = ChatCompletionMessageToolCalls::Function(
-                            ChatCompletionMessageToolCall {
-                                id: tool_call_id.clone(),
-                                function: FunctionCall {
-                                    name: name.clone(),
-                                    arguments: arguments.to_string(),
-                                },
-                            },
-                        );
+        for extra_instruction in &request.instructions {
+            messages.push(
+                ChatCompletionRequestSystemMessageArgs::default()
+                    .content(extra_instruction.as_str())
+                    .build()?
+                    .into(),
+            );
+        }
 
-                        if let Some(ChatCompletionRequestMessage::Assistant(last)) =
-                            messages.last_mut()
-                        {
-                            last.tool_calls.get_or_insert_with(Vec::new).push(tool_call);
-                        } else {
-                            messages.push(
-                                ChatCompletionRequestAssistantMessageArgs::default()
-                                    .tool_calls(vec![tool_call])
-                                    .build()?
-                                    .into(),
-                            );
-                        }
-                    }
-                    ContentItem::ToolResult {
-                        tool_call_id,
-                        content,
-                        ..
-                    } => {
+        for item in &request.contents {
+            match item {
+                ContentItem::Message { role, content } => {
+                    let message: ChatCompletionRequestMessage = if role == "user" {
+                        ChatCompletionRequestUserMessageArgs::default()
+                            .content(content.clone())
+                            .build()?
+                            .into()
+                    } else {
+                        ChatCompletionRequestAssistantMessageArgs::default()
+                            .content(content.clone())
+                            .build()?
+                            .into()
+                    };
+                    messages.push(message);
+                }
+                ContentItem::ToolCall {
+                    tool_call_id,
+                    name,
+                    arguments,
+                } => {
+                    let tool_call =
+                        ChatCompletionMessageToolCalls::Function(ChatCompletionMessageToolCall {
+                            id: tool_call_id.clone(),
+                            function: FunctionCall {
+                                name: name.clone(),
+                                arguments: arguments.to_string(),
+                            },
+                        });
+
+                    if let Some(ChatCompletionRequestMessage::Assistant(last)) = messages.last_mut()
+                    {
+                        last.tool_calls.get_or_insert_with(Vec::new).push(tool_call);
+                    } else {
                         messages.push(
-                            ChatCompletionRequestToolMessageArgs::default()
-                                .tool_call_id(tool_call_id.clone())
-                                .content(content.clone())
+                            ChatCompletionRequestAssistantMessageArgs::default()
+                                .tool_calls(vec![tool_call])
                                 .build()?
                                 .into(),
                         );
                     }
+                }
+                ContentItem::ToolResult {
+                    tool_call_id,
+                    content,
+                    ..
+                } => {
+                    messages.push(
+                        ChatCompletionRequestToolMessageArgs::default()
+                            .tool_call_id(tool_call_id.clone())
+                            .content(content.clone())
+                            .build()?
+                            .into(),
+                    );
                 }
             }
         }
