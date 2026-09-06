@@ -1,6 +1,7 @@
 use crate::agent::{ContentItem, llm_request::LlmRequest};
 
 pub mod sliding_window;
+pub mod compaction;
 
 pub fn count_tokens(_model: &str, request: &LlmRequest) -> usize {
     let bpe = tiktoken_rs::cl100k_base()
