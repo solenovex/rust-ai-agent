@@ -1,11 +1,8 @@
-use std::collections::HashSet;
-
 use crate::{
     agent::{
         ContentItem, ExecutionContext,
         llm_request::{BeforeLlmCallback, LlmRequest},
-    },
-    callback::context_optimizer::count_tokens,
+    }, callback::context_optimizer::{count_tokens, find_safe_start},
 };
 
 pub struct SlidingWindow {
@@ -36,35 +33,4 @@ impl BeforeLlmCallback for SlidingWindow {
 
         request.contents.drain(user_idx + 1 .. start);
     }
-}
-
-fn find_safe_start(contents: &[ContentItem], mut start: usize) -> usize {
-    loop {
-        let call_ids: HashSet<&str> = contents[start..].iter().filter_map(|item| match item {
-            ContentItem::ToolCall { tool_call_id, .. } => Some(tool_call_id.as_str()),
-            _ => None,
-        }).collect();
-
-        let missing_call = contents[start..].iter().find_map(|item| match item {
-            ContentItem::ToolResult { tool_call_id, .. } if ! call_ids.contains(&tool_call_id.as_str()) => {
-                Some(tool_call_id)
-            }
-            _=> None,
-        });
-
-        let Some(missing_call) = missing_call else {
-            break;
-        };
-
-        let Some(call_idx) = contents[..start].iter().position(|item| {
-            matches!(item, 
-            ContentItem::ToolCall { tool_call_id, .. } if tool_call_id == missing_call ) 
-        }) else {
-            break;
-        };
-
-        start = call_idx;
-    }
-
-    start
 }
