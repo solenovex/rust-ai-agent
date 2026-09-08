@@ -31,6 +31,10 @@ path = "examples/file_explorer.rs"
 name = "test_compression"
 path = "examples/test_compression.rs"
 
+[[example]]
+name = "test_context_optimizer"
+path = "examples/test_context_optimizer.rs"
+
 [dependencies]
 anyhow = "1.0.102"
 async-openai = { version = "0.41.0", features = [

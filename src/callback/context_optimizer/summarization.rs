@@ -15,7 +15,7 @@ pub struct Summarization {
 }
 
 impl Summarization {
-    pub async fn appy(
+    pub async fn apply(
         &self,
         context: &mut ExecutionContext,
         request: &mut LlmRequest,

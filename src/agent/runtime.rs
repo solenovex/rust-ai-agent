@@ -78,6 +78,11 @@ impl Agent {
         self
     }
 
+    pub fn with_before_llm_callback(mut self, callback: Arc<dyn BeforeLlmCallback>) -> Self {
+        self.before_llm_callbacks.push(callback);
+        self
+    }
+
     pub async fn run(&self, user_input: &str) -> anyhow::Result<AgentResult> {
         let mut context = ExecutionContext::new();
 

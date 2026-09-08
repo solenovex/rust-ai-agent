@@ -2,7 +2,8 @@ use crate::{
     agent::{
         ContentItem, ExecutionContext,
         llm_request::{BeforeLlmCallback, LlmRequest},
-    }, callback::context_optimizer::{count_tokens, find_safe_start},
+    },
+    callback::context_optimizer::{count_tokens, find_safe_start},
 };
 
 pub struct SlidingWindow {
@@ -14,7 +15,8 @@ pub struct SlidingWindow {
 #[async_trait::async_trait]
 impl BeforeLlmCallback for SlidingWindow {
     async fn call(&self, _context: &mut ExecutionContext, request: &mut LlmRequest) {
-        if count_tokens(&self.model, request) < self.token_threshold {
+        let before = count_tokens(&self.model, request);
+        if before < self.token_threshold {
             return;
         }
 
@@ -28,9 +30,21 @@ impl BeforeLlmCallback for SlidingWindow {
             .position(|item| matches!(item, ContentItem::Message { role , .. } if role == "user"));
         let Some(user_idx) = user_idx else { return };
 
-        let start= find_safe_start(&request.contents, request.contents.len() - self.window_size);
-        let start = start.max(user_idx  + 1);
+        tracing::info!(
+            "SlidingWindow: {before} tokens >= threshold {}, trimming to last {} items",
+            self.token_threshold,
+            self.window_size
+        );
 
-        request.contents.drain(user_idx + 1 .. start);
+        let start = find_safe_start(&request.contents, request.contents.len() - self.window_size);
+        let start = start.max(user_idx + 1);
+
+        request.contents.drain(user_idx + 1..start);
+        
+        let after = count_tokens(&self.model, request);
+        tracing::info!(
+            "SlidingWindow: after trim, {after} tokens ({} items kept)",
+            request.contents.len()
+        );
     }
 }
