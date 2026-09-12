@@ -30,7 +30,7 @@ impl Summarization {
             return Ok(());
         };
 
-        let last_summary_idx = context.state.get("last_summary_idx").and_then(Value::as_u64)
+        let last_summary_idx = context.state_mut().get("last_summary_idx").and_then(Value::as_u64)
         .map(|v|v as usize).unwrap_or(user_idx);
 
         let summary_start = last_summary_idx + 1;
@@ -43,7 +43,7 @@ impl Summarization {
         let history_text = format_history(to_summarize);
         let new_summary_chunk = self.generate_summary(&history_text).await?;
 
-        let existing_summary = context.state.get("context_summary").and_then(Value::as_str)
+        let existing_summary = context.state_mut().get("context_summary").and_then(Value::as_str)
         .map(str::to_string);
         let full_summary = match existing_summary {
             Some(prev) => format!("{prev}\n\n{new_summary_chunk}"),
@@ -52,8 +52,8 @@ impl Summarization {
         request.append_instructions(format!("[Summary of earlier progress]\n{full_summary}"));
 
         request.contents.drain((user_idx + 1)..summary_end);
-        context.state.insert("last_summary_idx".to_string(), Value::from((summary_end - 1) as u64));
-        context.state.insert("context_summary".to_string(), Value::String(full_summary));
+        context.state_mut().insert("last_summary_idx".to_string(), Value::from((summary_end - 1) as u64));
+        context.state_mut().insert("context_summary".to_string(), Value::String(full_summary));
 
         Ok(())
     }

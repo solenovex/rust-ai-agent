@@ -10,7 +10,7 @@ pub struct Session {
     pub session_id: String,
     pub user_id: Option<String>,
     pub events: Vec<Event>,
-    pub state: HashMap<String, Value>,
+    pub state: State,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -27,3 +27,5 @@ impl Session {
         }
     }
 }
+
+pub type State = HashMap<String, Value>;

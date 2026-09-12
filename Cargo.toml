@@ -8,14 +8,6 @@ name = "stream_chat"
 path = "examples/stream_chat.rs"
 
 [[example]]
-name = "tool_call_complete"
-path = "examples/tool_call_complete.rs"
-
-[[example]]
-name = "simple_agent_loop"
-path = "examples/simple_agent_loop.rs"
-
-[[example]]
 name = "agent_run"
 path = "examples/agent_run.rs"
 
@@ -34,6 +26,10 @@ path = "examples/test_compression.rs"
 [[example]]
 name = "test_context_optimizer"
 path = "examples/test_context_optimizer.rs"
+
+[[example]]
+name = "multi_turn"
+path = "examples/multi_turn.rs"
 
 [dependencies]
 anyhow = "1.0.102"

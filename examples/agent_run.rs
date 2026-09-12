@@ -4,6 +4,7 @@ use ai_agent::{agent::Agent, constant::GPT_4O_MINI_MODEL, tools::build_toolbox};
 use chrono::Local;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -52,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
 4. 根据我的消费情况，给我一个是否应该购买的建议。
 
 所有价格和消费数据必须来自工具，不要自己猜测数据。",
+            &Uuid::new_v4().to_string(),
         )
         .await?;
 
@@ -59,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
     println!(
         "\n本次执行一共走了 {} 步，记录了 {} 条 Event（execution_id = {}）",
         result.context.current_step,
-        result.context.events.len(),
+        result.context.events().len(),
         result.context.execution_id
     );
 

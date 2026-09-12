@@ -1,7 +1,6 @@
-use std::collections::HashMap;
-
-use serde_json::Value;
 use uuid::Uuid;
+
+use crate::session::model::{Session, State};
 
 use super::event::Event;
 
@@ -23,36 +22,36 @@ impl TokenUsage {
 #[derive(Debug)]
 pub struct ExecutionContext {
     pub execution_id: String,
-    pub events: Vec<Event>,
     pub current_step: u32,
-    pub state: HashMap<String, Value>,
     pub final_result: Option<String>,
-    pub usage: TokenUsage
+    pub usage: TokenUsage,
+    pub session: Session,
 }
 
 impl ExecutionContext {
-    pub fn new() -> Self {
+    pub fn new(session: Session) -> Self {
         Self {
             execution_id: Uuid::new_v4().to_string(),
-            events: Vec::new(),
             current_step: 0,
-            state: HashMap::new(),
             final_result: None,
-            usage: TokenUsage::default()
+            usage: TokenUsage::default(),
+            session
         }
     }
 
     pub fn add_event(&mut self, event: Event) {
-        self.events.push(event);
+        self.session.events.push(event);
+    }
+
+    pub fn events(&self) -> Vec<Event> {
+        self.session.events.clone()
+    }
+
+    pub fn state_mut(&mut self) -> &mut State {
+        &mut self.session.state
     }
 
     pub fn increment_step(&mut self) {
         self.current_step += 1;
-    }
-}
-
-impl Default for ExecutionContext {
-    fn default() -> Self {
-        Self::new()
     }
 }

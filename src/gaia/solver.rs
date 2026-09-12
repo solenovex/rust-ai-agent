@@ -6,6 +6,7 @@ use async_openai::types::chat::{
     CreateChatCompletionRequestArgs, FinishReason, ResponseFormat, ResponseFormatJsonSchema,
 };
 use backon::{ExponentialBuilder, Retryable};
+use uuid::Uuid;
 
 use crate::{agent::Agent, gaia::models::GaiaOutput, tools::ToolBox};
 
@@ -79,6 +80,6 @@ pub async fn solve_problem_with_tools(
     toolbox: Arc<ToolBox>,
 ) -> anyhow::Result<GaiaOutput> {
     let agent = Agent::new(model, Some(system), toolbox).with_max_steps(15);
-    let result = agent.run_structured::<GaiaOutput>(prompt).await?;
+    let result = agent.run_structured::<GaiaOutput>(prompt, &Uuid::new_v4().to_string()).await?;
     Ok(result.output)
 }

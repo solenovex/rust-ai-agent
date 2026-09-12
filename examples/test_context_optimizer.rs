@@ -1,6 +1,12 @@
 use std::sync::Arc;
 
-use ai_agent::{agent::{Agent, llm_request::BeforeLlmCallback}, callback::context_optimizer::{ContextOptimizer, sliding_window::SlidingWindow}, constant::GPT_4O_MINI_MODEL, tools::{ToolBox, build_toolbox}};
+use ai_agent::{
+    agent::{Agent, llm_request::BeforeLlmCallback},
+    callback::context_optimizer::{ContextOptimizer, sliding_window::SlidingWindow},
+    constant::GPT_4O_MINI_MODEL,
+    tools::{ToolBox, build_toolbox},
+};
+use uuid::Uuid;
 
 const SYSTEM_PROMPT: &str = "你是一个善用网页搜索的研究助手。请每次只调用一次 web_search，\
 拿到结果、看完之后再决定下一步搜什么，不要一次性并行发起多个搜索。\
@@ -18,14 +24,13 @@ async fn run_demo(
         .with_max_steps(8)
         .with_before_llm_callback(callback);
 
-    let result = agent.run(QUERY).await?;
+    let result = agent.run(QUERY, &Uuid::new_v4().to_string()).await?;
 
     println!("\n最终回答: {}", result.output);
     println!("累计消耗 tokens: {}", result.context.usage.total_tokens);
 
     Ok(())
 }
-
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

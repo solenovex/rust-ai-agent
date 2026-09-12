@@ -1,59 +1,72 @@
-use std::collections::{HashMap, hash_map::Entry};
+use std::{collections::HashMap, sync::Mutex};
 
 use anyhow::Ok;
 
 use crate::session::model::Session;
 
 #[async_trait::async_trait]
-pub trait SessionManager {
-    async fn create(&mut self, session_id: &str, user_id: Option<&str>) -> anyhow::Result<Session>;
+pub trait SessionManager: Send + Sync {
+    async fn create(&self, session_id: &str, user_id: Option<&str>) -> anyhow::Result<Session>;
     async fn get(&self, session_id: &str) -> anyhow::Result<Option<Session>>;
-    async fn save(&mut self, session: Session) -> anyhow::Result<()>;
+    async fn save(&self, session: Session) -> anyhow::Result<()>;
     async fn get_or_create(
-        &mut self,
+        &self,
         session_id: &str,
         user_id: Option<&str>,
     ) -> anyhow::Result<Session>;
 }
 
 pub struct InMemorySessionManager {
-    pub sessions: HashMap<String, Session>,
+    pub sessions: Mutex<HashMap<String, Session>>,
+}
+
+impl InMemorySessionManager {
+    pub fn new() -> Self {
+        InMemorySessionManager {
+            sessions: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for InMemorySessionManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait::async_trait]
 impl SessionManager for InMemorySessionManager {
-    async fn create(&mut self, session_id: &str, user_id: Option<&str>) -> anyhow::Result<Session> {
-        if self.sessions.contains_key(session_id) {
+    async fn create(&self, session_id: &str, user_id: Option<&str>) -> anyhow::Result<Session> {
+        let mut guard = self.sessions.lock().unwrap();
+        if guard.contains_key(session_id) {
             anyhow::bail!("session already exists: {session_id}")
         }
 
         let session = Session::new(session_id.to_owned(), user_id.map(str::to_owned));
-        match self.sessions.entry(session_id.to_owned()) {
-            Entry::Occupied(_) => {
-                anyhow::bail!("session already exists: {session_id}")
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(session.clone());
-                Ok(session)
-            }
-        }
+        guard.insert(session_id.to_owned(), session.clone());
+        Ok(session)
     }
 
     async fn get(&self, session_id: &str) -> anyhow::Result<Option<Session>> {
-        let one: Option<Session> = self.sessions.get(session_id).cloned();
-        Ok(one)
+        Ok(self.sessions.lock().unwrap().get(session_id).cloned())
     }
 
-    async fn save(&mut self, session: Session) -> anyhow::Result<()> {
-        self.sessions.insert(session.session_id.clone(), session);
+    async fn save(&self, session: Session) -> anyhow::Result<()> {
+        let mut guard = self.sessions.lock().unwrap();
+        guard.insert(session.session_id.clone(), session);
         Ok(())
     }
 
-    async fn get_or_create(&mut self, session_id: &str, user_id: Option<&str>) -> anyhow::Result<Session> {
-        if let Some(session) = self.get(session_id).await? {
-            return Ok(session);
-        }
-
-        self.create(session_id, user_id).await
+    async fn get_or_create(
+        &self,
+        session_id: &str,
+        user_id: Option<&str>,
+    ) -> anyhow::Result<Session> {
+        let mut guard = self.sessions.lock().unwrap();
+        let session = guard
+            .entry(session_id.to_owned())
+            .or_insert_with(|| Session::new(session_id.to_owned(), user_id.map(str::to_string)))
+            .clone();
+        Ok(session)
     }
 }
