@@ -2,7 +2,7 @@ use anyhow::Ok;
 use async_openai::types::chat::{ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs};
 use serde_json::Value;
 
-use crate::{agent::{ContentItem, ExecutionContext, llm_request::LlmRequest}, callback::context_optimizer::find_safe_start};
+use crate::{agent::{ContentItem, ExecutionContext, event::ToolCall, llm_request::LlmRequest}, callback::context_optimizer::find_safe_start};
 
 const SUMMARIZATION_PROMPT: &str = "You are summarizing an AI agent's work-in-progress \
 history. Given the execution history below, write a short, structured summary covering: \
@@ -94,9 +94,9 @@ fn format_history(items: &[ContentItem]) -> String {
                 let preview: String = content.chars().take(500).collect();
                 format!("[{role}]: {preview}")
             }
-            ContentItem::ToolCall {
+            ContentItem::ToolCall(ToolCall {
                 name, arguments, ..
-            } => {
+            }) => {
                 format!("[tool call]: {name}({arguments})")
             }
             ContentItem::ToolResult { name, content, .. } => {

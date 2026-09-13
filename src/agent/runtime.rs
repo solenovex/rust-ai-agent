@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
@@ -13,8 +13,7 @@ use serde_json::Value;
 
 use crate::{
     agent::{
-        callback::{AfterToolCallback, BeforeToolCallback, ToolCallView},
-        llm_request::{BeforeLlmCallback, LlmRequest},
+        callback::{AfterToolCallback, BeforeToolCallback, ToolCallView}, confirmation::{PendingToolCall, ToolConfirmation}, event::ToolCall, llm_request::{BeforeLlmCallback, LlmRequest},
     }, session::manager::{InMemorySessionManager, SessionManager}, tools::ToolBox,
 };
 
@@ -23,16 +22,25 @@ use super::{
     event::{ContentItem, Event, ToolResultStatus},
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentStatus {
+    Complete,
+    PendingConfirmation,
+}
+
 #[derive(Debug)]
 pub struct AgentResult {
-    pub output: String,
+    pub output: Option<String>,
     pub context: ExecutionContext,
+    pub status: AgentStatus,
+    pub pending_tool_calls: Vec<PendingToolCall>,
 }
 
 #[derive(Debug)]
 pub struct StructuredAgentResult<T> {
     pub output: T,
     pub context: ExecutionContext,
+    pub status: AgentStatus,
 }
 
 pub struct Agent {
@@ -60,7 +68,7 @@ impl Agent {
             before_tool_callbacks: Vec::new(),
             after_tool_callbacks: Vec::new(),
             before_llm_callbacks: Vec::new(),
-            session_manager: Box::new(InMemorySessionManager::new())
+            session_manager: Box::new(InMemorySessionManager::new()),
         }
     }
 
@@ -89,18 +97,32 @@ impl Agent {
         self
     }
 
-    pub async fn run(&self, user_input: &str, session_id: &str) -> anyhow::Result<AgentResult> {
+    pub async fn run(
+        &self,
+        user_input: Option<&str>,
+        session_id: &str,
+        tool_confirmations: Option<Vec<ToolConfirmation>>,
+    ) -> anyhow::Result<AgentResult> {
         let session = self.session_manager.get_or_create(session_id, None).await?;
         let mut context = ExecutionContext::new(session);
 
-        context.add_event(Event::new(
-            context.execution_id.clone(),
-            "user",
-            vec![ContentItem::Message {
-                role: "user".to_string(),
-                content: user_input.to_string(),
-            }],
-        ));
+        if let Some(input) = user_input {
+            context.add_event(Event::new(
+                context.execution_id.clone(),
+                "user",
+                vec![ContentItem::Message {
+                    role: "user".to_string(),
+                    content: input.to_string(),
+                }],
+            ));
+        }
+
+        if let Some(confirmations) = tool_confirmations {
+            let value = serde_json::to_value(&confirmations)?;
+            context
+                .state_mut()
+                .insert("tool_confirmations".to_string(), value);
+        }
 
         let client = async_openai::Client::new();
 
@@ -124,7 +146,7 @@ impl Agent {
                 );
             }
 
-            let llm_request = self.prepare_llm_request(&mut context).await;
+            let llm_request = self.prepare_llm_request(&mut context).await?;
             let messages = self.build_messages(&llm_request)?;
 
             let request = CreateChatCompletionRequestArgs::default()
@@ -156,6 +178,18 @@ impl Agent {
             if let Some(tool_calls) = message.tool_calls {
                 self.record_tool_calls(&mut context, &tool_calls);
                 self.execute_tool_calls(&mut context, &tool_calls).await;
+
+                if let Some(raw_pending) = context.state_mut().get("pending_tool_calls").cloned() {
+                    let pending_tool_calls: Vec<PendingToolCall> =
+                        serde_json::from_value(raw_pending)?;
+                    self.session_manager.save(context.session.clone()).await?;
+                    return Ok(AgentResult {
+                        output: None,
+                        context,
+                        status: AgentStatus::PendingConfirmation,
+                        pending_tool_calls,
+                    });
+                }
             } else {
                 let content = message
                     .content
@@ -172,8 +206,10 @@ impl Agent {
                 context.final_result = Some(content.clone());
                 self.session_manager.save(context.session.clone()).await?;
                 return Ok(AgentResult {
-                    output: content,
+                    output: Some(content),
                     context,
+                    status: AgentStatus::Complete,
+                    pending_tool_calls: Vec::new(),
                 });
             }
 
@@ -184,7 +220,7 @@ impl Agent {
     pub async fn run_structured<T>(
         &self,
         user_input: &str,
-        session_id: &str
+        session_id: &str,
     ) -> anyhow::Result<StructuredAgentResult<T>>
     where
         T: schemars::JsonSchema + serde::de::DeserializeOwned,
@@ -224,7 +260,7 @@ impl Agent {
                 );
             }
 
-            let llm_request = self.prepare_llm_request(&mut context).await;
+            let llm_request = self.prepare_llm_request(&mut context).await?;
             let messages = self.build_messages(&llm_request)?;
 
             let request = CreateChatCompletionRequestArgs::default()
@@ -290,6 +326,7 @@ impl Agent {
                 return Ok(StructuredAgentResult {
                     output: parsed,
                     context,
+                    status: AgentStatus::Complete
                 });
             }
 
@@ -298,7 +335,24 @@ impl Agent {
         }
     }
 
-    async fn prepare_llm_request(&self, context: &mut ExecutionContext) -> LlmRequest {
+    async fn prepare_llm_request(&self, context: &mut ExecutionContext) -> anyhow::Result<LlmRequest> {
+        if let (Some(raw_pending), Some(raw_confirmations)) = (
+            context.state_mut().remove("pending_tool_calls"),
+            context.state_mut().remove("tool_confirmations"),
+        ) {
+            let confirmation_results = self
+                .process_confirmations(context, raw_pending, raw_confirmations)
+                .await?;
+
+            if !confirmation_results.is_empty() {
+                context.add_event(Event::new(
+                    context.execution_id.clone(),
+                    "tool",
+                    confirmation_results,
+                ));
+            }
+        }
+        
         let mut request = LlmRequest {
             instructions: Vec::new(),
             contents: context
@@ -312,8 +366,81 @@ impl Agent {
             cb.call(context, &mut request).await;
         }
 
-        request
+        Ok(request)
     }
+
+    async fn process_confirmations(
+        &self,
+        context: &ExecutionContext,
+        raw_pending: Value,
+        raw_confirmations: Value,
+    ) -> anyhow::Result<Vec<ContentItem>> {
+        let pending_calls: Vec<PendingToolCall> = serde_json::from_value(raw_pending)?;
+        let confirmations: Vec<ToolConfirmation> = serde_json::from_value(raw_confirmations)?;
+
+        let confirmation_map: HashMap<String, ToolConfirmation> = confirmations
+            .into_iter()
+            .map(|c| (c.tool_call_id.clone(), c))
+            .collect();
+
+        let mut results = Vec::with_capacity(pending_calls.len());
+
+        for pending in pending_calls {
+            let tool_call_id = pending.tool_call.tool_call_id;
+            let name = pending.tool_call.name;
+            let confirmation = confirmation_map.get(&tool_call_id);
+
+            let (status, content) = match confirmation {
+                Some(c) if c.approved => {
+                    let mut arguments = pending
+                        .tool_call
+                        .arguments
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(overrides) = &c.modified_arguments {
+                        arguments.extend(overrides.clone());
+                    }
+                    let args_json = Value::Object(arguments).to_string();
+
+                    match self.toolbox.get(&name) {
+                        Some(tool) => match tool.execute(&args_json, context).await {
+                            Ok(result) => (ToolResultStatus::Success, result),
+                            Err(err) => (
+                                ToolResultStatus::Error,
+                                format!("Tool execution error: {err}"),
+                            ),
+                        },
+                        None => (
+                            ToolResultStatus::Error,
+                            format!("Tool execution error: unknown tool {name}"),
+                        ),
+                    }
+                }
+                Some(c) => {
+                    let reason = c
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "Tool execution was rejected by user.".to_string());
+                    (ToolResultStatus::Error, reason)
+                }
+                None => (
+                    ToolResultStatus::Error,
+                    "Tool execution was not approved.".to_string(),
+                ),
+            };
+
+            results.push(ContentItem::ToolResult {
+                tool_call_id,
+                name,
+                status,
+                content,
+            });
+        }
+
+        Ok(results)
+    }
+
 
     fn record_tool_calls(
         &self,
@@ -326,11 +453,11 @@ impl Agent {
                 let arguments: serde_json::Value =
                     serde_json::from_str(&function_call.function.arguments)
                         .unwrap_or(serde_json::Value::Null);
-                call_items.push(ContentItem::ToolCall {
+                call_items.push(ContentItem::ToolCall(ToolCall {
                     tool_call_id: function_call.id.clone(),
                     name: function_call.function.name.clone(),
                     arguments,
-                });
+                }));
             }
         }
         context.add_event(Event::new(
@@ -346,6 +473,7 @@ impl Agent {
         tool_calls: &[ChatCompletionMessageToolCalls],
     ) {
         let mut result_items = Vec::new();
+        let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
 
         for tool_call in tool_calls {
             let ChatCompletionMessageToolCalls::Function(function_call) = tool_call else {
@@ -357,6 +485,22 @@ impl Agent {
             tracing::info!("Tool call: {function_name}({arguments})");
 
             let arguments_value: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
+            
+            if let Some(tool) = self.toolbox.get(function_name)
+                && tool.requires_confirmation() {
+                    tracing::info!("Tool call requires confirmation: {function_name}");
+                    pending_tool_calls.push(PendingToolCall {
+                        tool_call: ToolCall {
+                            tool_call_id: function_call.id.clone(),
+                            name: function_name.clone(),
+                            arguments: arguments_value.clone(),
+                        },
+                        confirmation_message: tool.get_confirmation_message(&arguments_value),
+                    });
+                    continue;
+                }
+
+            
             let view = ToolCallView {
                 tool_call_id: &function_call.id,
                 name: function_name,
@@ -412,6 +556,13 @@ impl Agent {
             });
         }
 
+        if !pending_tool_calls.is_empty() {
+            let value = serde_json::to_value(&pending_tool_calls).unwrap_or(Value::Null);
+            context
+                .state_mut()
+                .insert("pending_tool_calls".to_string(), value);
+        }
+
         context.add_event(Event::new(
             context.execution_id.clone(),
             "tool",
@@ -459,11 +610,11 @@ impl Agent {
                     };
                     messages.push(message);
                 }
-                ContentItem::ToolCall {
+                ContentItem::ToolCall(ToolCall {
                     tool_call_id,
                     name,
                     arguments,
-                } => {
+                }) => {
                     let tool_call =
                         ChatCompletionMessageToolCalls::Function(ChatCompletionMessageToolCall {
                             id: tool_call_id.clone(),

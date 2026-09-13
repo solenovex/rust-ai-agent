@@ -1,7 +1,10 @@
 use serde_json::Value;
 
 use crate::{
-    agent::{ContentItem, ExecutionContext, ToolResultStatus, callback::AfterToolCallback},
+    agent::{
+        ContentItem, ExecutionContext, ToolResultStatus, callback::AfterToolCallback,
+        event::ToolCall,
+    },
     knowledge_base::{chunk::fixed_length_chunking, search::vector_search},
 };
 
@@ -73,11 +76,11 @@ fn extract_query(context: &ExecutionContext, tool_call_id: &str) -> Option<Strin
         .iter()
         .flat_map(|event| &event.content)
         .find_map(|item| match item {
-            ContentItem::ToolCall {
+            ContentItem::ToolCall(ToolCall {
                 tool_call_id: id,
                 name,
                 arguments,
-            } if id == tool_call_id && name == "web_search" => arguments
+            }) if id == tool_call_id && name == "web_search" => arguments
                 .get("query")
                 .and_then(Value::as_str)
                 .map(str::to_owned),

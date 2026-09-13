@@ -2,34 +2,7 @@
 name = "ai-agent"
 version = "0.1.0"
 edition = "2024"
-
-[[example]]
-name = "stream_chat"
-path = "examples/stream_chat.rs"
-
-[[example]]
-name = "agent_run"
-path = "examples/agent_run.rs"
-
-[[example]]
-name = "search_web"
-path = "examples/search_web.rs"
-
-[[example]]
-name = "file_explorer"
-path = "examples/file_explorer.rs"
-
-[[example]]
-name = "test_compression"
-path = "examples/test_compression.rs"
-
-[[example]]
-name = "test_context_optimizer"
-path = "examples/test_context_optimizer.rs"
-
-[[example]]
-name = "multi_turn"
-path = "examples/multi_turn.rs"
+default-run = "ai-agent"
 
 [dependencies]
 anyhow = "1.0.102"

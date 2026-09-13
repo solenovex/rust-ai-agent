@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::{agent::{ContentItem, ExecutionContext, llm_request::{BeforeLlmCallback, LlmRequest}}, callback::context_optimizer::{compaction::Compaction, summarization::Summarization}};
+use crate::{agent::{ContentItem, ExecutionContext, event::ToolCall, llm_request::{BeforeLlmCallback, LlmRequest}}, callback::context_optimizer::{compaction::Compaction, summarization::Summarization}};
 
 pub mod sliding_window;
 pub mod compaction;
@@ -80,7 +80,7 @@ pub fn count_tokens(_model: &str, request: &LlmRequest) -> usize {
         total += 4;
         total += match item {
             ContentItem::Message { content, .. } => bpe.encode_ordinary(content).len(),
-            ContentItem::ToolCall { name, arguments, .. } => {
+            ContentItem::ToolCall(ToolCall { name, arguments, .. }) => {
                 bpe.encode_ordinary(name).len() + bpe.encode_ordinary(&arguments.to_string()).len()
             },
             ContentItem::ToolResult { content, .. } => bpe.encode_ordinary(content).len(),
@@ -94,7 +94,7 @@ pub fn count_tokens(_model: &str, request: &LlmRequest) -> usize {
 fn find_safe_start(contents: &[ContentItem], mut start: usize) -> usize {
     loop {
         let call_ids: HashSet<&str> = contents[start..].iter().filter_map(|item| match item {
-            ContentItem::ToolCall { tool_call_id, .. } => Some(tool_call_id.as_str()),
+            ContentItem::ToolCall(ToolCall { tool_call_id, .. }) => Some(tool_call_id.as_str()),
             _ => None,
         }).collect();
 
@@ -111,7 +111,7 @@ fn find_safe_start(contents: &[ContentItem], mut start: usize) -> usize {
 
         let Some(call_idx) = contents[..start].iter().position(|item| {
             matches!(item, 
-            ContentItem::ToolCall { tool_call_id, .. } if tool_call_id == missing_call ) 
+            ContentItem::ToolCall (ToolCall{ tool_call_id, .. }) if tool_call_id == missing_call ) 
         }) else {
             break;
         };
