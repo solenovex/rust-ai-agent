@@ -1,6 +1,7 @@
 pub mod context;
 pub mod event;
 pub mod runtime;
+pub mod tool_exec;
 pub mod callback;
 pub mod llm_request;
 pub mod confirmation;
