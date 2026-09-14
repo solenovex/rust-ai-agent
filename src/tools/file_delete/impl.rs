@@ -22,7 +22,16 @@ impl Tool for DeleteFileTool {
     }
 
     fn parameters(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(DeleteFileArgs)).expect("schema is always serializable")
+        serde_json::to_value(schemars::schema_for!(DeleteFileArgs))
+            .expect("schema is always serializable")
+    }
+
+    fn requires_confirmation(&self) -> bool {
+        true
+    }
+
+    fn confirmation_message_template(&self) -> &str {
+        "即将执行不可逆的文件删除操作：{arguments}，是否批准？"
     }
 
     async fn execute(

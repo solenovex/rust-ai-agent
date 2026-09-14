@@ -53,13 +53,13 @@ fn chat_stream(
     }
 }
 
-pub async fn chat_stream_with_retry(model: &str, system: Option<&str>, prompt: &str) -> anyhow::Result<String> {
+pub async fn chat_stream_with_retry(
+    model: &str,
+    system: Option<&str>,
+    prompt: &str,
+) -> anyhow::Result<String> {
     let op = || async {
-        let s = chat_stream(
-            model,
-            system,
-            prompt,
-        );
+        let s = chat_stream(model, system, prompt);
 
         futures::pin_mut!(s);
         let mut output = String::new();
@@ -67,7 +67,6 @@ pub async fn chat_stream_with_retry(model: &str, system: Option<&str>, prompt: &
             match result {
                 Ok(txt) => {
                     output.push_str(&txt);
-                    print!("{txt}");
                 }
                 Err(err) => {
                     tracing::error!("\nError while streaming: {}", err);
@@ -78,5 +77,6 @@ pub async fn chat_stream_with_retry(model: &str, system: Option<&str>, prompt: &
         Ok(output)
     };
 
-    op.retry(ExponentialBuilder::default().with_max_times(3)).await
+    op.retry(ExponentialBuilder::default().with_max_times(3))
+        .await
 }

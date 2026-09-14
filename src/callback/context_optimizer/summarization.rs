@@ -1,8 +1,13 @@
-use anyhow::Ok;
-use async_openai::types::chat::{ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs};
+use async_openai::types::chat::{
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+    CreateChatCompletionRequestArgs,
+};
 use serde_json::Value;
 
-use crate::{agent::{ContentItem, ExecutionContext, event::ToolCall, llm_request::LlmRequest}, callback::context_optimizer::find_safe_start};
+use crate::{
+    agent::{ContentItem, ExecutionContext, event::ToolCall, llm_request::LlmRequest},
+    callback::context_optimizer::find_safe_start,
+};
 
 const SUMMARIZATION_PROMPT: &str = "You are summarizing an AI agent's work-in-progress \
 history. Given the execution history below, write a short, structured summary covering: \
@@ -24,17 +29,24 @@ impl Summarization {
             return Ok(());
         }
 
-        let user_idx = request.contents.iter().position(|item|matches!(item, 
-        ContentItem::Message { role, .. } if role == "user"));
+        let user_idx = request.contents.iter().position(|item| {
+            matches!(item,
+        ContentItem::Message { role, .. } if role == "user")
+        });
         let Some(user_idx) = user_idx else {
             return Ok(());
         };
 
-        let last_summary_idx = context.state_mut().get("last_summary_idx").and_then(Value::as_u64)
-        .map(|v|v as usize).unwrap_or(user_idx);
+        let last_summary_idx = context
+            .state_mut()
+            .get("last_summary_idx")
+            .and_then(Value::as_u64)
+            .map(|v| v as usize)
+            .unwrap_or(user_idx);
 
         let summary_start = last_summary_idx + 1;
-        let summary_end = find_safe_start(&request.contents, request.contents.len() - self.keep_recent);
+        let summary_end =
+            find_safe_start(&request.contents, request.contents.len() - self.keep_recent);
         if summary_end <= summary_start {
             return Ok(());
         }
@@ -43,17 +55,25 @@ impl Summarization {
         let history_text = format_history(to_summarize);
         let new_summary_chunk = self.generate_summary(&history_text).await?;
 
-        let existing_summary = context.state_mut().get("context_summary").and_then(Value::as_str)
-        .map(str::to_string);
+        let existing_summary = context
+            .state_mut()
+            .get("context_summary")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let full_summary = match existing_summary {
             Some(prev) => format!("{prev}\n\n{new_summary_chunk}"),
-            None => new_summary_chunk
+            None => new_summary_chunk,
         };
         request.append_instructions(format!("[Summary of earlier progress]\n{full_summary}"));
 
         request.contents.drain((user_idx + 1)..summary_end);
-        context.state_mut().insert("last_summary_idx".to_string(), Value::from((summary_end - 1) as u64));
-        context.state_mut().insert("context_summary".to_string(), Value::String(full_summary));
+        context.state_mut().insert(
+            "last_summary_idx".to_string(),
+            Value::from((summary_end - 1) as u64),
+        );
+        context
+            .state_mut()
+            .insert("context_summary".to_string(), Value::String(full_summary));
 
         Ok(())
     }
@@ -84,7 +104,6 @@ impl Summarization {
             .unwrap_or_default())
     }
 }
-
 
 fn format_history(items: &[ContentItem]) -> String {
     items

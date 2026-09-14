@@ -8,10 +8,7 @@ use ai_agent::{
         Agent, AgentStatus, ContentItem, ExecutionContext, PendingToolCall, TokenUsage,
         ToolConfirmation,
     },
-    callback::{
-        approval::ApprovalCallback, context_optimizer::ContextOptimizer,
-        search_compressor::SearchCompressorCallback,
-    },
+    callback::{context_optimizer::ContextOptimizer, search_compressor::SearchCompressorCallback},
     constant::{GPT_4O_MINI_MODEL, VISION_MODEL},
     tools::{build_file_explorer_toolbox, build_toolbox},
 };
@@ -63,7 +60,6 @@ async fn main() -> anyhow::Result<()> {
 
     let agent = Agent::new(GPT_4O_MINI_MODEL, Some(instructions), toolbox)
         .with_max_steps(12)
-        .with_before_tool_callback(Arc::new(ApprovalCallback::new(["delete_file"])))
         .with_after_tool_callback(Arc::new(SearchCompressorCallback))
         .with_before_llm_callback(Arc::new(ContextOptimizer {
             token_threshold: 20_000,
@@ -214,7 +210,7 @@ fn print_tool_trace(context: &ExecutionContext) {
             continue;
         }
 
-        for item in event.content {
+        for item in &event.content {
             match item {
                 ContentItem::ToolCall(tool_call) => {
                     println!(

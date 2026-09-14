@@ -1,12 +1,19 @@
 use std::collections::HashSet;
 
-use crate::{agent::{ContentItem, ExecutionContext, event::ToolCall, llm_request::{BeforeLlmCallback, LlmRequest}}, callback::context_optimizer::{compaction::Compaction, summarization::Summarization}};
+use crate::{
+    agent::{
+        ContentItem, ExecutionContext,
+        event::ToolCall,
+        llm_request::{BeforeLlmCallback, LlmRequest},
+    },
+    callback::context_optimizer::{compaction::Compaction, summarization::Summarization},
+};
 
-pub mod sliding_window;
 pub mod compaction;
+pub mod sliding_window;
 pub mod summarization;
 
-pub struct ContextOptimizer{
+pub struct ContextOptimizer {
     pub model: String,
     pub token_threshold: usize,
     pub enable_compaction: bool,
@@ -17,12 +24,12 @@ pub struct ContextOptimizer{
 
 impl ContextOptimizer {
     pub fn new(model: impl Into<String>) -> Self {
-        Self { 
-            model: model.into(), 
-            token_threshold: 20_000, 
-            enable_compaction: true, 
-            compaction_keep_recent: 4, 
-            enable_summarization: true, 
+        Self {
+            model: model.into(),
+            token_threshold: 20_000,
+            enable_compaction: true,
+            compaction_keep_recent: 4,
+            enable_summarization: true,
             keep_recent: 5,
         }
     }
@@ -36,13 +43,15 @@ impl BeforeLlmCallback for ContextOptimizer {
             return;
         }
         tracing::info!(
-            "ContextOptimizer: {before} tokens >= threshold {}, optimizing", self.token_threshold
+            "ContextOptimizer: {before} tokens >= threshold {}, optimizing",
+            self.token_threshold
         );
 
         if self.enable_compaction {
-            Compaction{
+            Compaction {
                 keep_recent: self.compaction_keep_recent,
-            }.apply(request);
+            }
+            .apply(request);
             let after = count_tokens(&self.model, request);
             tracing::info!("ContextOptimizer: compaction brought it to {after} tokens");
             if after < self.token_threshold {
@@ -51,11 +60,11 @@ impl BeforeLlmCallback for ContextOptimizer {
         }
 
         if self.enable_summarization {
-            let summarizer = Summarization{
+            let summarizer = Summarization {
                 model: self.model.clone(),
                 keep_recent: self.keep_recent,
             };
-            match summarizer.apply(context, request).await{
+            match summarizer.apply(context, request).await {
                 Ok(()) => {
                     let after = count_tokens(&self.model, request);
                     tracing::info!("ContextOptimizer: summarization brought it to {after} tokens");
@@ -80,9 +89,11 @@ pub fn count_tokens(_model: &str, request: &LlmRequest) -> usize {
         total += 4;
         total += match item {
             ContentItem::Message { content, .. } => bpe.encode_ordinary(content).len(),
-            ContentItem::ToolCall(ToolCall { name, arguments, .. }) => {
+            ContentItem::ToolCall(ToolCall {
+                name, arguments, ..
+            }) => {
                 bpe.encode_ordinary(name).len() + bpe.encode_ordinary(&arguments.to_string()).len()
-            },
+            }
             ContentItem::ToolResult { content, .. } => bpe.encode_ordinary(content).len(),
         }
     }
@@ -90,19 +101,23 @@ pub fn count_tokens(_model: &str, request: &LlmRequest) -> usize {
     total
 }
 
-
 fn find_safe_start(contents: &[ContentItem], mut start: usize) -> usize {
     loop {
-        let call_ids: HashSet<&str> = contents[start..].iter().filter_map(|item| match item {
-            ContentItem::ToolCall(ToolCall { tool_call_id, .. }) => Some(tool_call_id.as_str()),
-            _ => None,
-        }).collect();
+        let call_ids: HashSet<&str> = contents[start..]
+            .iter()
+            .filter_map(|item| match item {
+                ContentItem::ToolCall(ToolCall { tool_call_id, .. }) => Some(tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect();
 
         let missing_call = contents[start..].iter().find_map(|item| match item {
-            ContentItem::ToolResult { tool_call_id, .. } if ! call_ids.contains(&tool_call_id.as_str()) => {
+            ContentItem::ToolResult { tool_call_id, .. }
+                if !call_ids.contains(&tool_call_id.as_str()) =>
+            {
                 Some(tool_call_id)
             }
-            _=> None,
+            _ => None,
         });
 
         let Some(missing_call) = missing_call else {
@@ -110,8 +125,8 @@ fn find_safe_start(contents: &[ContentItem], mut start: usize) -> usize {
         };
 
         let Some(call_idx) = contents[..start].iter().position(|item| {
-            matches!(item, 
-            ContentItem::ToolCall (ToolCall{ tool_call_id, .. }) if tool_call_id == missing_call ) 
+            matches!(item,
+            ContentItem::ToolCall (ToolCall{ tool_call_id, .. }) if tool_call_id == missing_call )
         }) else {
             break;
         };
@@ -120,4 +135,41 @@ fn find_safe_start(contents: &[ContentItem], mut start: usize) -> usize {
     }
 
     start
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn call(id: &str) -> ContentItem {
+        ContentItem::ToolCall(ToolCall {
+            tool_call_id: id.to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({"file_path": "notes.txt"}),
+        })
+    }
+
+    fn result(id: &str) -> ContentItem {
+        ContentItem::ToolResult {
+            tool_call_id: id.to_string(),
+            name: "read_file".to_string(),
+            status: crate::agent::ToolResultStatus::Success,
+            content: "contents".to_string(),
+        }
+    }
+
+    #[test]
+    fn safe_start_keeps_matching_tool_call_for_retained_result() {
+        let contents = vec![call("a"), result("a"), call("b"), result("b")];
+
+        assert_eq!(find_safe_start(&contents, 3), 2);
+    }
+
+    #[test]
+    fn safe_start_does_not_move_when_window_is_already_valid() {
+        let contents = vec![call("a"), result("a"), call("b"), result("b")];
+
+        assert_eq!(find_safe_start(&contents, 2), 2);
+    }
 }

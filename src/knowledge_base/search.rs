@@ -1,7 +1,5 @@
 use std::{cmp::Ordering, collections::BinaryHeap};
 
-use anyhow::Ok;
-
 use crate::{
     constant::TEXT_EMBEDDING_3_SMALL_MODEL,
     knowledge_base::embed::{embed_text, embed_texts},

@@ -1,7 +1,5 @@
 use std::{collections::HashMap, sync::Mutex};
 
-use anyhow::Ok;
-
 use crate::session::model::Session;
 
 #[async_trait::async_trait]
@@ -38,13 +36,16 @@ impl Default for InMemorySessionManager {
 impl SessionManager for InMemorySessionManager {
     async fn create(&self, session_id: &str, user_id: Option<&str>) -> anyhow::Result<Session> {
         let mut guard = self.sessions.lock().unwrap();
-        if guard.contains_key(session_id) {
-            anyhow::bail!("session already exists: {session_id}")
+        match guard.entry(session_id.to_owned()) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                anyhow::bail!("session already exists: {session_id}")
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let session = Session::new(session_id.to_owned(), user_id.map(str::to_owned));
+                entry.insert(session.clone());
+                Ok(session)
+            }
         }
-
-        let session = Session::new(session_id.to_owned(), user_id.map(str::to_owned));
-        guard.insert(session_id.to_owned(), session.clone());
-        Ok(session)
     }
 
     async fn get(&self, session_id: &str) -> anyhow::Result<Option<Session>> {

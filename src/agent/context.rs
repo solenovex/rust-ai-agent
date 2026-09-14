@@ -35,7 +35,7 @@ impl ExecutionContext {
             current_step: 0,
             final_result: None,
             usage: TokenUsage::default(),
-            session
+            session,
         }
     }
 
@@ -43,8 +43,8 @@ impl ExecutionContext {
         self.session.events.push(event);
     }
 
-    pub fn events(&self) -> Vec<Event> {
-        self.session.events.clone()
+    pub fn events(&self) -> &[Event] {
+        &self.session.events
     }
 
     pub fn state_mut(&mut self) -> &mut State {

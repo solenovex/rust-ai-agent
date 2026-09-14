@@ -1,4 +1,3 @@
-use anyhow::Ok;
 use async_openai::types::embeddings::{CreateEmbeddingRequestArgs, EmbeddingInput};
 
 pub async fn embed_texts(texts: &[String], model: &str) -> anyhow::Result<Vec<Vec<f32>>> {

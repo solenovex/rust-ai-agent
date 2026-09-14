@@ -1,7 +1,5 @@
 use std::{fs, path::Path};
 
-use anyhow::Ok;
-
 pub fn list(path: &str) -> anyhow::Result<String> {
     let path = Path::new(path);
     if !path.exists() {

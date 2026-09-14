@@ -1,5 +1,3 @@
-use anyhow::Ok;
-
 use crate::gaia::models::{GaiaRow, HfResponse};
 
 pub async fn load_gaia_level1() -> anyhow::Result<Vec<GaiaRow>> {

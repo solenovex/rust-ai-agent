@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Ok;
 use async_openai::types::chat::{
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
     CreateChatCompletionRequestArgs, FinishReason, ResponseFormat, ResponseFormatJsonSchema,
@@ -80,6 +79,8 @@ pub async fn solve_problem_with_tools(
     toolbox: Arc<ToolBox>,
 ) -> anyhow::Result<GaiaOutput> {
     let agent = Agent::new(model, Some(system), toolbox).with_max_steps(15);
-    let result = agent.run_structured::<GaiaOutput>(prompt, &Uuid::new_v4().to_string()).await?;
+    let result = agent
+        .run_structured::<GaiaOutput>(prompt, &Uuid::new_v4().to_string())
+        .await?;
     Ok(result.output)
 }

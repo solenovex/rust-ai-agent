@@ -65,3 +65,47 @@ impl Compaction {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::ToolResultStatus;
+    use serde_json::json;
+
+    #[test]
+    fn compacts_known_tool_results_but_preserves_unknown_tools() {
+        let mut request = LlmRequest {
+            instructions: Vec::new(),
+            contents: vec![
+                ContentItem::ToolCall(ToolCall {
+                    tool_call_id: "read-1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: json!({"file_path": "notes.txt"}),
+                }),
+                ContentItem::ToolResult {
+                    tool_call_id: "read-1".to_string(),
+                    name: "read_file".to_string(),
+                    status: ToolResultStatus::Success,
+                    content: "large file contents".to_string(),
+                },
+                ContentItem::ToolResult {
+                    tool_call_id: "other-1".to_string(),
+                    name: "custom_tool".to_string(),
+                    status: ToolResultStatus::Success,
+                    content: "custom output".to_string(),
+                },
+            ],
+        };
+
+        Compaction { keep_recent: 1 }.apply(&mut request);
+
+        let ContentItem::ToolResult { content, .. } = &request.contents[1] else {
+            panic!("expected a tool result");
+        };
+        assert!(content.contains("notes.txt"));
+        let ContentItem::ToolResult { content, .. } = &request.contents[2] else {
+            panic!("expected a tool result");
+        };
+        assert_eq!(content, "custom output");
+    }
+}

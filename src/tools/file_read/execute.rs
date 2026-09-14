@@ -1,7 +1,5 @@
 use std::{fs, path::Path};
 
-use anyhow::Ok;
-
 use crate::tools::file_read::r#impl::ReadFileArgs;
 
 pub fn read(args: &ReadFileArgs) -> anyhow::Result<String> {
