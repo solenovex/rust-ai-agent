@@ -1,82 +1,22 @@
-use anyhow::Ok;
-use async_openai::types::chat::{
-    ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
-    CreateChatCompletionRequestArgs, ResponseFormat, ResponseFormatJsonSchema,
+use anyhow::Context;
+use async_openai::{
+    error::OpenAIError,
+    types::chat::{
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
+        CreateChatCompletionRequestArgs, ResponseFormat, ResponseFormatJsonSchema,
+    },
 };
 use backon::{ExponentialBuilder, Retryable};
 use serde::de::DeserializeOwned;
-use serde_json::Value;
 
-/// OpenAI 的 strict JSON Schema 模式对 object 节点有两条额外要求，
-/// `schemars::schema_for!()` 默认都不满足，需要在发请求前手动修补：
-///
-/// 1. 必须显式声明 `"additionalProperties": false`。
-/// 2. `"required"` 必须包含 `properties` 里的每一个键——strict 模式
-///    没有“可选属性”的概念；`Option<T>` 字段本该用
-///    `"type": ["T", "null"]`（nullable）来表达“可能为空”，而不是
-///    把它从 required 里去掉。schemars 默认走的是后一种写法，
-///    所以这里连带把 required 也强制补全。
-fn enforce_strict_json_schema(schema: &mut Value) {
-    match schema {
-        Value::Object(map) => {
-            if map.get("type").and_then(Value::as_str) == Some("object") {
-                map.insert("additionalProperties".to_string(), Value::Bool(false));
-
-                if let Some(Value::Object(properties)) = map.get("properties") {
-                    let all_keys: Vec<Value> = properties
-                        .keys()
-                        .map(|k| Value::String(k.clone()))
-                        .collect();
-                    map.insert("required".to_string(), Value::Array(all_keys));
-                }
-            }
-            for value in map.values_mut() {
-                enforce_strict_json_schema(value);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                enforce_strict_json_schema(item);
-            }
-        }
-        _ => {}
-    }
-}
-
-pub async fn ask_text(model: &str, prompt: &str) -> anyhow::Result<String> {
-    let client = async_openai::Client::new();
-    let messages: Vec<ChatCompletionRequestMessage> = vec![
-        ChatCompletionRequestUserMessageArgs::default()
-            .content(prompt)
-            .build()?
-            .into(),
-    ];
-
-    let request = CreateChatCompletionRequestArgs::default()
-        .model(model)
-        .messages(messages)
-        .build()?;
-
-    let response = (|| async { client.chat().create(request.clone()).await })
-        .retry(ExponentialBuilder::default().with_max_times(3))
-        .await?;
-
-    response
-        .choices
-        .into_iter()
-        .next()
-        .and_then(|c| c.message.content)
-        .ok_or_else(|| anyhow::anyhow!("No content in response"))
-}
-
-pub async fn ask_structured<T>(model: &str, prompt: &str) -> anyhow::Result<T>
+pub async fn ask<T>(model: &str, prompt: &str) -> anyhow::Result<T>
 where
     T: schemars::JsonSchema + DeserializeOwned,
 {
     let client = async_openai::Client::new();
-    let schema = schemars::schema_for!(T);
-    let mut schema_json = serde_json::to_value(&schema)?;
-    enforce_strict_json_schema(&mut schema_json);
+
+    let mut schema = serde_json::to_value(schemars::schema_for!(T))?;
+    enforce_strict_schema(&mut schema);
 
     let messages: Vec<ChatCompletionRequestMessage> = vec![
         ChatCompletionRequestUserMessageArgs::default()
@@ -90,9 +30,9 @@ where
         .messages(messages)
         .response_format(ResponseFormat::JsonSchema {
             json_schema: ResponseFormatJsonSchema {
-                name: "structured_output".to_string(),
+                name: "response".to_string(),
                 description: None,
-                schema: schema_json,
+                schema,
                 strict: Some(true),
             },
         })
@@ -100,14 +40,60 @@ where
 
     let response = (|| async { client.chat().create(request.clone()).await })
         .retry(ExponentialBuilder::default().with_max_times(3))
-        .await?;
+        .when(is_retryable)
+        .await
+        .context("LLM request failed")?;
 
-    let content = response
+    let message = response
         .choices
         .into_iter()
         .next()
-        .and_then(|c| c.message.content)
-        .ok_or_else(|| anyhow::anyhow!("No content in response"))?;
+        .ok_or_else(|| anyhow::anyhow!("LLM returned no choices"))?
+        .message;
 
-    Ok(serde_json::from_str(&content)?)
+    if let Some(refusal) = message.refusal {
+        return Err(anyhow::anyhow!("LLM refused to answer: {refusal}"));
+    }
+
+    let content = message
+        .content
+        .ok_or_else(|| anyhow::anyhow!("LLM returned empty content"))?;
+
+    serde_json::from_str(&content).with_context(|| format!("failed to parse LLM output: {content}"))
+}
+
+fn enforce_strict_schema(schema: &mut serde_json::Value) {
+    match schema {
+        serde_json::Value::Object(map) => {
+            if map.get("type").and_then(serde_json::Value::as_str) == Some("object") {
+                map.insert(
+                    "additionalProperties".into(),
+                    serde_json::Value::Bool(false),
+                );
+                if let Some(serde_json::Value::Object(props)) = map.get("properties") {
+                    let keys: Vec<serde_json::Value> = props
+                        .keys()
+                        .map(|k| serde_json::Value::String(k.clone()))
+                        .collect();
+                    map.insert("required".into(), serde_json::Value::Array(keys));
+                }
+            }
+            for v in map.values_mut() {
+                enforce_strict_schema(v);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(enforce_strict_schema),
+        _ => {}
+    }
+}
+
+fn is_retryable(e: &OpenAIError) -> bool {
+    match e {
+        OpenAIError::Reqwest(_) => true,
+        OpenAIError::ApiError(api) => matches!(
+            api.api_error.r#type.as_deref(),
+            Some("rate_limit_exceeded" | "server_error")
+        ),
+        _ => false,
+    }
 }

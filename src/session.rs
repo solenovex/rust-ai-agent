@@ -1,2 +1,2 @@
 pub mod model;
-pub mod manager;
+pub mod session_manager;

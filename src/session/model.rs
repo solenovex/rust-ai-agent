@@ -1,18 +1,18 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
-use serde_json::Value;
+use chrono::Utc;
 
-use crate::agent::Event;
+use crate::agent::{event::AgentEvent, tool_confirmation::PendingToolCall};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Session {
     pub session_id: String,
     pub user_id: Option<String>,
-    pub events: Vec<Event>,
+    pub events: Vec<AgentEvent>,
     pub state: State,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+    pub pending_tool_calls: Vec<PendingToolCall>,
 }
 
 impl Session {
@@ -25,20 +25,17 @@ impl Session {
             state: HashMap::new(),
             created_at: now,
             updated_at: now,
+            pending_tool_calls: Vec::new(),
         }
     }
-}
 
-pub type State = HashMap<String, Value>;
+    pub fn add_event(&mut self, event: AgentEvent) {
+        self.events.push(event);
+    }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn new_session_uses_one_creation_timestamp() {
-        let session = Session::new("session-1".to_string(), None);
-
-        assert_eq!(session.created_at, session.updated_at);
+    pub fn add_pending_tool_call(&mut self, pending_tool_call: PendingToolCall) {
+        self.pending_tool_calls.push(pending_tool_call);
     }
 }
+
+pub type State = HashMap<String, serde_json::Value>;

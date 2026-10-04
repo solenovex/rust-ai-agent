@@ -1,5 +1,8 @@
 /target
-.DS_Store
 .env
-.vscode/**
+/gaia_cache
+libpdfium.so
 *.db
+*.db-wal
+*.db-shm
+*.db-journal

@@ -22,11 +22,13 @@ Existing memories:
 New memory:
 {new_memory}
 
-Respond with one of:
+Decide:
 - ADD: This is new information that should be stored
 - SKIP: Similar information already exists, no need to store
 
 Judgment criteria:
 - Same problem with different approach or different result counts as new information
 - Same problem with same approach and same result is a duplicate
+
+Give your decision and a brief reason.
 "#;

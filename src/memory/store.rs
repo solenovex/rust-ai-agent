@@ -2,13 +2,8 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
-use crate::{knowledge_base::search::cosine_similarity, memory::task_memory::TaskMemory};
+use crate::{memory::task_memory::TaskMemory, search::similarity::cosine_similarity};
 
-/// 用 Mutex 包裹 Connection：rusqlite::Connection 内部用 RefCell
-/// 做单线程内部可变性，天生不满足 Sync。Tool trait 要求
-/// `Send + Sync`（因为要塞进 Box<dyn Tool> 在多线程 runtime 里跑），
-/// Mutex<T> 只要 T: Send 就自动是 Sync，Connection 本身是 Send 的，
-/// 包一层就能满足这个约束。
 pub struct TaskMemoryStore {
     conn: Mutex<Connection>,
 }
@@ -63,7 +58,11 @@ impl TaskMemoryStore {
         Ok(())
     }
 
-    pub fn query(&self, query_embedding: &[f32], top_k: usize) -> anyhow::Result<Vec<TaskMemory>> {
+    pub fn query(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> anyhow::Result<Vec<(f32, TaskMemory)>> {
         if top_k == 0 {
             return Ok(Vec::new());
         }
@@ -97,8 +96,13 @@ impl TaskMemoryStore {
         let rows: Vec<(TaskMemory, Vec<f32>)> = raw_rows
             .into_iter()
             .filter_map(|(mem, embedding_json)| {
-                let embedding: Vec<f32> = serde_json::from_str(&embedding_json).ok()?;
-                Some((mem, embedding))
+                match serde_json::from_str::<Vec<f32>>(&embedding_json) {
+                    Ok(embedding) => Some((mem, embedding)),
+                    Err(e) => {
+                        tracing::warn!("skipping memory with corrupt embedding: {e}");
+                        None
+                    }
+                }
             })
             .collect();
 
@@ -109,8 +113,7 @@ impl TaskMemoryStore {
 
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
         scored.truncate(top_k);
-
-        Ok(scored.into_iter().map(|(_, mem)| mem).collect())
+        Ok(scored)
     }
 }
 
@@ -138,7 +141,7 @@ mod tests {
         let results = store.query(&[0.9, 0.1, 0.0], 1)?;
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].task_summary, "圆的面积怎么算");
+        assert_eq!(results[0].1.task_summary, "圆的面积怎么算");
         Ok(())
     }
 

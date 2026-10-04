@@ -1,8 +1,12 @@
 use std::sync::Arc;
 
-use crate::{gaia::{
-    models::{GaiaEvalResult, GaiaOutput, GaiaRow}, solver::{solve_problem_with_retry, solve_problem_with_tools},
-}, tools::ToolBox};
+use crate::{
+    gaia::{
+        model::{GaiaEvalResult, GaiaOutput, GaiaRow},
+        solver::{solve_gaia_problem_with_retry, solve_gaia_problem_with_tools_with_retry},
+    },
+    tool::ToolBox,
+};
 
 pub const GAIA_PROMPT: &str = r#"You are a general AI assistant. I will ask you a question.
 First, determine if you can solve this problem with your current capabilities and set "is_solvable" accordingly.
@@ -51,7 +55,7 @@ fn to_eval_result(
 }
 
 pub async fn evaluate_gaia_single(problem: GaiaRow, model: &str) -> GaiaEvalResult {
-    let result = solve_problem_with_retry(model, GAIA_PROMPT, &problem.question).await;
+    let result = solve_gaia_problem_with_retry(model, GAIA_PROMPT, &problem.question).await;
     to_eval_result(problem, model, result)
 }
 
@@ -60,6 +64,7 @@ pub async fn evaluate_gaia_single_with_tools(
     model: &str,
     toolbox: Arc<ToolBox>,
 ) -> GaiaEvalResult {
-    let result = solve_problem_with_tools(model, GAIA_PROMPT, &problem.question, toolbox).await;
+    let result =
+        solve_gaia_problem_with_tools_with_retry(model, GAIA_PROMPT, &problem, toolbox).await;
     to_eval_result(problem, model, result)
 }

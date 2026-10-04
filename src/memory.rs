@@ -1,4 +1,4 @@
-pub mod task_memory;
+pub mod memory_manager;
 pub mod prompt;
 pub mod store;
-pub mod manager;
+pub mod task_memory;

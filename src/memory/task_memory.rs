@@ -16,14 +16,22 @@ impl TaskMemory {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum MemoryDecision {
+    Add,
+    Skip,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DuplicateCheckResult {
-    pub decision: String,
+    pub decision: MemoryDecision,
+    /// Explanation for the decision
     pub reason: String,
 }
 
 impl DuplicateCheckResult {
     pub fn is_duplicate(&self) -> bool {
-        self.decision.eq_ignore_ascii_case("SKIP")
+        self.decision == MemoryDecision::Skip
     }
 }
