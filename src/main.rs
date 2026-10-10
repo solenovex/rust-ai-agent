@@ -7,11 +7,7 @@ use study_agent::{
         },
         event::{AgentEvent, ContentItem, Message},
         model::Agent,
-    },
-    constant::{FINAL_ANSWER_TOOL_NAME, GPT_6_LUNA_PRO_MODEL},
-    llm::llm_answer::TextAnswer,
-    memory::memory_manager::TaskMemoryManager,
-    tool::{build_toolbox, final_answer::FinalAnswerTool, memory_tool::RecallMemoryTool},
+    }, constant::{FINAL_ANSWER_TOOL_NAME, GPT_6_LUNA_PRO_MODEL, TEXT_EMBEDDING_3_SMALL_MODEL}, llm::llm_answer::TextAnswer, memory::memory_manager::TaskMemoryManager, tool::{Tool, build_toolbox, final_answer::FinalAnswerTool, memory_tool::RecallMemoryTool},
 };
 use uuid::Uuid;
 
@@ -32,17 +28,18 @@ async fn main() -> anyhow::Result<()> {
     let memory_manager = Arc::new(TaskMemoryManager::new(
         DB_PATH,
         GPT_6_LUNA_PRO_MODEL,
-        "text-embedding-3-small",
+        TEXT_EMBEDDING_3_SMALL_MODEL,
     )?);
 
     let mut toolbox = build_toolbox().await?;
     toolbox.insert(
         FINAL_ANSWER_TOOL_NAME.to_owned(),
         Box::new(FinalAnswerTool::<TextAnswer>::new()),
-    );
+    );    
+    let recall_memory_tool = RecallMemoryTool::new(memory_manager.clone());
     toolbox.insert(
-        "recall_memory".to_owned(),
-        Box::new(RecallMemoryTool::new(memory_manager.clone())),
+        recall_memory_tool.name().to_owned(),
+        Box::new(recall_memory_tool),
     );
 
     let agent = Agent::new(
