@@ -13,7 +13,7 @@ impl Tool for CalculatorTool {
     }
 
     fn description(&self) -> &str {
-        "Perform basic arithmetic operations: add (+), subtract (-), multiply (*), divide (/)."
+        "Perform basic arithmetic operations: add (+), subtract (-), multiply (*), divide (/); and power (^)."
     }
 
     fn parameters(&self) -> Value {
@@ -41,6 +41,7 @@ impl Tool for CalculatorTool {
 
 #[derive(Deserialize, Debug, JsonSchema)]
 pub struct CalculatorArgs {
+    /// One of: "+", "-", "*", "/", "^" (power: first_number raised to second_number)    
     pub operator: String,
     pub first_number: f64,
     pub second_number: f64,
@@ -65,6 +66,7 @@ pub fn calculator(
                 Ok(first_number / second_number)
             }
         }
+        "^" => Ok(first_number.powf(second_number)),        
         other => Err(format!("Unsupported operator: {other}")),
     }
 }

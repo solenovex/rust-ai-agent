@@ -6,3 +6,4 @@ pub mod memory;
 pub mod search;
 pub mod session;
 pub mod tool;
+pub mod planning;

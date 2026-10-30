@@ -3,15 +3,11 @@ use std::{collections::HashMap, sync::Arc};
 use async_openai::types::chat::{ChatCompletionTool, ChatCompletionTools, FunctionObjectArgs};
 
 use crate::{
-    agent::context::ExecutionContext,
-    tool::{
-        calculator::CalculatorTool,
-        file::{
+    agent::context::ExecutionContext, tool::{
+        calculator::CalculatorTool, file::{
             delete::DeleteFileTool, list::ListFileTool, read::ReadFileTool,
             read_media::ReadMediaTool, unzip::UnzipFileTool,
-        },
-        mcp::{client::McpClient, mcp_tool::McpTool},
-        web_search::WebSearchTool,
+        }, mcp::{client::McpClient, mcp_tool::McpTool}, planning::CreateTasksTool, web_search::WebSearchTool,
     },
 };
 
@@ -21,6 +17,7 @@ pub mod final_answer;
 pub mod mcp;
 pub mod memory_tool;
 pub mod web_search;
+pub mod planning;
 
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
@@ -67,6 +64,7 @@ pub async fn build_toolbox() -> anyhow::Result<ToolBox> {
         Box::new(DeleteFileTool),
         Box::new(ReadFileTool),
         Box::new(ReadMediaTool),
+        Box::new(CreateTasksTool)
     ];
 
     let mcp_client = Arc::new(McpClient::connect().await?);

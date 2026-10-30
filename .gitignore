@@ -6,3 +6,6 @@ libpdfium.so
 *.db-wal
 *.db-shm
 *.db-journal
+.DS_Store
+.vscode/settings.json
+.vscode/settings.json
