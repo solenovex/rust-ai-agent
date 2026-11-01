@@ -36,7 +36,7 @@ impl Tool for CreateTasksTool {
 
     fn parameters(&self) -> serde_json::Value {
         serde_json::to_value(schema_for!(CreateTasksArgs))
-            .expect("Failed to serialize output schema")
+            .expect("Failed to serialize planning parameters schema")
     }
 
     fn requires_confirmation(&self) -> bool {
