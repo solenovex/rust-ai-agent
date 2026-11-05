@@ -79,6 +79,7 @@ pub async fn gaia_experiment() -> anyhow::Result<()> {
     // With Tools
 
     let mut toolbox = build_toolbox().await?;
+    study_agent::tool::code::register_code_tools(&mut toolbox).await?;
     toolbox.insert(
         FINAL_ANSWER_TOOL_NAME.to_owned(),
         Box::new(FinalAnswerTool::<GaiaOutput>::new()),

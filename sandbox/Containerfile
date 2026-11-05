@@ -1,0 +1,6 @@
+# Containerfile
+FROM docker.io/library/python:3.12-slim
+RUN pip install --no-cache-dir pandas openpyxl numpy pypdf requests matplotlib
+WORKDIR /workspace
+
+# podman build -t localhost/ai-agent-sandbox:latest -f sandbox/Containerfile sandbox/

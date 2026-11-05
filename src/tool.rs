@@ -20,6 +20,7 @@ pub mod web_search;
 pub mod planning;
 pub mod reflection;
 pub mod failing_tools;
+pub mod code;
 
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {

@@ -157,11 +157,18 @@ impl Agent {
 
                     match self.toolbox.get(&name) {
                         Some(tool) => match tool.execute(&args_json, context).await {
-                            Ok(result) => (ToolResultStatus::Success, result),
-                            Err(err) => (
-                                ToolResultStatus::Error,
-                                format!("Tool execution error: {err}"),
-                            ),
+                            Ok(result) => {
+                                tracing::info!(
+                                    "Confirmed tool call ({tool_call_id}): {name} ok: {result}"
+                                );
+                                (ToolResultStatus::Success, result)
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    "Confirmed tool call ({tool_call_id}): {name} failed: {err}"
+                                );
+                                (ToolResultStatus::Error, format!("Tool execution error: {err}"))
+                            }
                         },
                         None => (
                             ToolResultStatus::Error,
