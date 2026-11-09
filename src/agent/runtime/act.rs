@@ -26,7 +26,7 @@ impl Agent {
                             .unwrap_or(serde_json::Value::Null);
                         context.session.add_event(AgentEvent::new(
                             context.execution_id.clone(),
-                            "assistant",
+                            self.name.clone(),
                             vec![ContentItem::ToolCall(ToolCall::new(
                                 tool_call.id.clone(),
                                 tool_call.function.name.clone(),
@@ -45,7 +45,7 @@ impl Agent {
                     tracing::info!("Custom tool call not implemented");
                     context.session.add_event(AgentEvent::new(
                         context.execution_id.clone(),
-                        "agent",
+                        self.name.clone(),
                         vec![ContentItem::ToolResult(ToolResult::new(
                             custom_tool_call.id.clone(),
                             custom_tool_call.custom_tool.name.clone(),
@@ -71,7 +71,7 @@ impl Agent {
 
         context.session.add_event(AgentEvent::new(
             context.execution_id.clone(),
-            "assistant",
+            self.name.clone(),
             vec![ContentItem::ToolCall(ToolCall::new(
                 tool_call_id.clone(),
                 tool_name.clone(),
@@ -94,7 +94,7 @@ impl Agent {
         if let Some(before_callback_result) = before_callback_result {
             context.session.add_event(AgentEvent::new(
                 context.execution_id.clone(),
-                "agent",
+                self.name.clone(),
                 vec![ContentItem::ToolResult(ToolResult::new(
                     tool_call_id.clone(),
                     tool_name.clone(),
@@ -140,7 +140,7 @@ impl Agent {
 
             context.session.add_event(AgentEvent::new(
                 context.execution_id.clone(),
-                "agent",
+                self.name.clone(),
                 vec![ContentItem::ToolResult(ToolResult::new(
                     tool_call_id.clone(),
                     tool_name.clone(),

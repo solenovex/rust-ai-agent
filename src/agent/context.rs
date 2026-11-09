@@ -2,7 +2,7 @@ use uuid::Uuid;
 
 use crate::session::model::Session;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ExecutionContext {
     pub execution_id: String,
     pub current_step: usize,

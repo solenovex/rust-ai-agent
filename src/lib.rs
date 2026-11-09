@@ -9,3 +9,4 @@ pub mod tool;
 pub mod planning;
 pub mod sandbox;
 pub mod skill;
+pub mod multi_agent;

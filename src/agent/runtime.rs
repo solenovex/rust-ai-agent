@@ -13,37 +13,12 @@ pub mod step;
 pub mod think;
 
 impl Agent {
-    pub async fn run<T: DeserializeOwned>(
+    /// 在已有的上下文上运行循环。工作流内部会调用它。
+    pub async fn run_in_context(
         &self,
-        user_prompt: &str,
-        session_id: &str,
-        tool_confirmations: Option<Vec<ToolConfirmation>>,
-    ) -> anyhow::Result<AgentResult<T>> {
-        let session = self.session_manager.get_or_create(session_id, None).await?;
-        let mut context = ExecutionContext::new(session);
-
-        if !user_prompt.is_empty() {
-            let user_event = AgentEvent::new(
-                context.execution_id.clone(),
-                "user",
-                vec![ContentItem::Message(Message::new(
-                    "user".to_owned(),
-                    user_prompt.to_owned(),
-                ))],
-            );
-            context.session.add_event(user_event);
-        }
-
-        if let Some(confirmations) = tool_confirmations {
-            let value = serde_json::to_value(&confirmations)?;
-            context
-                .session
-                .state
-                .insert("tool_confirmations".to_string(), value);
-        }
-
+        mut context: ExecutionContext,
+    ) -> anyhow::Result<AgentResult<serde_json::Value>> {
         let client = async_openai::Client::new();
-        println!("You> {user_prompt}");
         loop {
             if context.current_step >= self.max_steps {
                 anyhow::bail!(
@@ -72,12 +47,59 @@ impl Agent {
                     };
                     self.session_manager.save(context.session.clone()).await?;
                     return Ok(AgentResult::new(
-                        serde_json::from_value(value)?,
+                        Some(value),
                         context,
                         AgentStatus::Complete,
                     ));
                 }
             }
         }
+    }
+
+    /// 原来的 run 现在是薄包装：创建上下文 → 加入用户消息 → 调用 run_in_context。
+    pub async fn run<T: DeserializeOwned>(
+        &self,
+        user_prompt: &str,
+        session_id: &str,
+        tool_confirmations: Option<Vec<ToolConfirmation>>,
+    ) -> anyhow::Result<AgentResult<T>> {
+        let session = self.session_manager.get_or_create(session_id, None).await?;
+        let mut context = ExecutionContext::new(session);
+
+        push_user_message(&mut context, user_prompt);
+
+        if let Some(confirmations) = tool_confirmations {
+            let value = serde_json::to_value(&confirmations)?;
+            context
+                .session
+                .state
+                .insert("tool_confirmations".to_string(), value);
+        }
+
+        println!("You> {user_prompt}");
+
+        let result = self.run_in_context(context).await?;
+
+        let output = match result.output {
+            Some(value) => serde_json::from_value::<Option<T>>(value)?,
+            None => None,
+        };
+
+        Ok(AgentResult::new(output, result.context, result.status))
+    }
+}
+
+/// 把用户消息加入上下文。空字符串会被忽略。
+pub fn push_user_message(context: &mut ExecutionContext, text: &str) {
+    if !text.is_empty() {
+        let user_event = AgentEvent::new(
+            context.execution_id.clone(),
+            "user",
+            vec![ContentItem::Message(Message::new(
+                "user".to_owned(),
+                text.to_owned(),
+            ))],
+        );
+        context.session.add_event(user_event);
     }
 }

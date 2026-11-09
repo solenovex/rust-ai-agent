@@ -35,7 +35,7 @@ impl Agent {
             println!(" AI> {content}");
             context.session.add_event(AgentEvent::new(
                 context.execution_id.clone(),
-                "agent",
+                self.name.clone(),
                 vec![ContentItem::Message(Message::new(
                     "assistant".to_owned(),
                     content.clone(),
