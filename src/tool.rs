@@ -21,6 +21,11 @@ pub mod planning;
 pub mod reflection;
 pub mod failing_tools;
 pub mod code;
+pub mod agent_tool;
+pub mod github_stars;
+
+pub use agent_tool::AgentTool;
+pub use github_stars::GithubStarsTool;
 
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {

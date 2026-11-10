@@ -26,6 +26,10 @@ impl AgentNode for Agent {
         &self.name
     }
 
+    fn description(&self) -> &str {
+        &self.description
+    }
+
     async fn execute(
         &self,
         user_input: Option<String>,

@@ -9,6 +9,8 @@
 //!   cargo run -- loop <prompt>         # same, with your own copywriting task
 //!   cargo run -- composite             # researcher -> [3 analysts in parallel] -> [writer <-> reviewer loop] -> editor
 //!   cargo run -- composite <prompt>    # same, with your own report topic
+//!   cargo run -- agent-tool            # 协调员把 researcher / coder 当作工具调用
+//!   cargo run -- agent-tool <prompt>   # 同上，使用自定义的调研与编码任务
 //!
 //! The prompt is everything after the mode, so no quotes are needed:
 //!
@@ -46,7 +48,10 @@ use study_agent::{
             r#loop::LoopWorkflow, parallel::ParallelWorkflow, sequential::SequentialWorkflow,
         },
     },
-    tool::{ToolBox, build_toolbox, final_answer::FinalAnswerTool},
+    tool::{
+        AgentTool, GithubStarsTool, ToolBox, build_toolbox, code::register_code_tools,
+        final_answer::FinalAnswerTool, web_search::WebSearchTool,
+    },
 };
 use uuid::Uuid;
 
@@ -335,6 +340,115 @@ async fn run_composite_demo(prompt: Option<String>) -> anyhow::Result<()> {
     report(&result)
 }
 
+// ---------- 演示 5: Agent as Tool ----------
+
+const AGENT_TOOL_RESEARCHER_INSTRUCTIONS: &str = "\
+你是研究专员。请用中文回答。
+工作方式:
+1. 先调用 github_stars 工具,一次查询任务中提到的所有 GitHub 仓库,repos 参数传 \"owner/repo\" 列表。
+2. 只有需要补充框架简介或确认仓库归属时,才使用 web_search,最多 2 次。
+3. 最终只返回一个 Markdown 表格,列为:框架 | GitHub 仓库 | Star 数 | 来源 URL。
+   - Star 数必须使用 github_stars 返回的精确值,不要使用搜索结果摘要、排行榜或旧讨论帖里的数字。
+   - 来源 URL 使用 github_stars 返回的仓库 URL。
+   - 某个仓库查询失败时,Star 数写“查询失败”,并在来源 URL 写错误原因。
+4. 不要输出搜索过程,也不要编造数据。";
+
+const AGENT_TOOL_CODER_INSTRUCTIONS: &str = "\
+你是 Python 专家。请用中文回答。
+调用方会在 request 中提供一份调研表格(框架、GitHub 仓库、Star 数)。
+严格要求:
+1. 只使用 request 中给出的数据,把它们硬编码到脚本里。
+2. 禁止访问网络、禁止调用 GitHub API、禁止安装第三方库,只使用 Python 标准库。
+3. 脚本输出 Markdown 表格和 ASCII 柱状图。
+4. 执行脚本,返回一次完整代码和真实运行输出;不要重复解释同一段代码。
+5. 如果执行失败,返回错误信息,不要编造运行结果。";
+
+const AGENT_TOOL_COORDINATOR_INSTRUCTIONS: &str = "\
+你是项目协调员。请用中文回答。
+工作流程固定如下:
+1. 先调用 researcher,获取一份“框架 | GitHub 仓库 | Star 数 | 来源 URL”的表格。
+2. 再调用 coder,把 researcher 返回的完整表格原样放进 request,要求它用这些数据生成 Markdown 表格、ASCII 柱状图和可运行脚本。
+3. 最终回答只包含以下内容,不要重复 coder 的整段解释:
+   - 最终 Markdown 表格
+   - ASCII 柱状图
+   - 一份完整 Python 脚本(只出现一次)
+   - 一句关于数据来源和 Star 数会变化的说明
+注意:
+- coder 不联网,所有数字必须来自 researcher。
+- 不要自己编造 Star 数或 URL。";
+
+/// 演示 Agent as Tool: coordinator 的 toolbox 里放的是另外两个 Agent。
+///
+/// 与 workflow 的关键区别:子代理在独立 session 中运行,coordinator 只看到
+/// 它们的最终输出,看不到中间的工具调用和推理过程。
+async fn run_agent_tool_demo(prompt: Option<String>) -> anyhow::Result<()> {
+    let prompt = prompt.unwrap_or_else(|| {
+        "调研最新的 AI Agent 框架(如 LangGraph、CrewAI、AutoGen),\
+         并写一个 Python 脚本比较它们的 GitHub star 数"
+            .to_owned()
+    });
+
+    // 1) 研究专员:github_stars 精确取数,web_search 只补充背景。
+    let mut researcher_tools = ToolBox::new();
+    researcher_tools.insert("github_stars".to_owned(), Box::new(GithubStarsTool));
+    researcher_tools.insert("web_search".to_owned(), Box::new(WebSearchTool));
+    let researcher = Arc::new(
+        make_agent(
+            "researcher",
+            AGENT_TOOL_RESEARCHER_INSTRUCTIONS,
+            researcher_tools,
+            6,
+        )
+        .with_description(
+            "联网搜索并总结任意主题的最新资料。适合需要事实、来源或最新信息的任务。",
+        ),
+    );
+
+    // 2) 编码专员:拥有沙箱代码执行能力(需配置 CODE_EXECUTION)。
+    let mut coder_tools = ToolBox::new();
+    let sandbox_prompt = register_code_tools(&mut coder_tools).await?;
+    if coder_tools.is_empty() {
+        tracing::warn!(
+            "code execution is not configured; the coder agent can only write code, not run it"
+        );
+    }
+    let mut coder_instructions = AGENT_TOOL_CODER_INSTRUCTIONS.to_owned();
+    if !sandbox_prompt.is_empty() {
+        coder_instructions.push_str("\n\n");
+        coder_instructions.push_str(&sandbox_prompt);
+    }
+    let coder = Arc::new(
+        make_agent("coder", &coder_instructions, coder_tools, 8)
+            .with_description(
+                "编写并执行 Python 代码,用于数据分析和可视化。适合计算、统计或生成图表的任务。",
+            ),
+    );
+
+    // 3) 协调员:普通 toolbox,只是把两个 Agent 包装成 Tool。
+    //    子代理内部需要确认的工具(如 execute_python)由 AgentTool 自动批准。
+    let mut orchestrator_tools = ToolBox::new();
+    orchestrator_tools.insert(
+        "researcher".to_owned(),
+        Box::new(AgentTool::new(researcher)),
+    );
+    orchestrator_tools.insert(
+        "coder".to_owned(),
+        Box::new(AgentTool::new(coder).with_auto_approve_child_tools(true)),
+    );
+
+    let orchestrator = make_agent(
+        "coordinator",
+        AGENT_TOOL_COORDINATOR_INSTRUCTIONS,
+        orchestrator_tools,
+        8,
+    );
+
+    let context = new_root_context(&orchestrator).await?;
+    // Agent 本身实现了 AgentNode,所以可以直接作为单节点执行。
+    let result = orchestrator.execute(Some(prompt), context).await?;
+    report(&result)
+}
+
 // ---------- entry ----------
 
 #[tokio::main]
@@ -355,8 +469,9 @@ async fn main() -> anyhow::Result<()> {
         "parallel" => run_parallel_demo(prompt).await,
         "loop" => run_loop_demo(prompt).await,
         "composite" => run_composite_demo(prompt).await,
+        "agent-tool" => run_agent_tool_demo(prompt).await,
         other => anyhow::bail!(
-            "unknown mode '{other}', use 'sequential', 'parallel', 'loop' or 'composite'"
+            "unknown mode '{other}', use 'sequential', 'parallel', 'loop', 'composite' or 'agent-tool'"
         ),
     }
 }

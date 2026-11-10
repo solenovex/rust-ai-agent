@@ -20,6 +20,11 @@ use crate::{
 
 pub struct Agent {
     pub name: String,
+    /// 这个 agent 能做什么的简短描述。
+    ///
+    /// 当 agent 被 [`crate::tool::agent_tool::AgentTool`] 包装后，这段文本会
+    /// 成为协调员看到的工具描述，因此应该说明**什么时候**该把任务委派给它。
+    pub description: String,
     pub model: String,
     pub instructions: Vec<String>,
     pub toolbox: Arc<ToolBox>,
@@ -38,6 +43,7 @@ impl Agent {
             toolbox,
             max_steps: 10,
             name: AGENT_NAME.to_owned(),
+            description: String::new(),
             before_tool_callbacks: Vec::new(),
             after_tool_callbacks: Vec::new(),
             before_llm_callbacks: Vec::new(),
@@ -47,6 +53,12 @@ impl Agent {
 
     pub fn with_name(mut self, name: String) -> Self {
         self.name = name;
+        self
+    }
+
+    /// 当这个 agent 被当作工具使用时，展示给协调员的描述。
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
         self
     }
 
