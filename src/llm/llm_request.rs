@@ -2,15 +2,19 @@ use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
-    ChatCompletionRequestUserMessageArgs, FunctionCall,
+    ChatCompletionRequestUserMessageArgs, ChatCompletionTools, FunctionCall,
 };
 
-use crate::{agent::event::ContentItem, tool::Tool};
+use crate::agent::event::ContentItem;
 
 pub struct LlmRequest {
     pub instructions: Vec<String>,
     pub contents: Vec<ContentItem>,
-    pub tools: Option<Vec<Box<dyn Tool>>>,
+    /// 本步要发给 LLM 的工具定义。
+    ///
+    /// 这里保存的是已经构造好的 `ChatCompletionTools`，而不是 `Tool` 对象：
+    /// 请求只需要 schema，把工具对象本身放进请求会让生命周期和所有权变复杂。
+    pub tools: Vec<ChatCompletionTools>,
     pub tool_choice: ToolChoice,
 }
 
@@ -19,13 +23,13 @@ impl LlmRequest {
         Self {
             instructions,
             contents,
-            tools: None,
+            tools: Vec::new(),
             tool_choice: ToolChoice::default(),
         }
     }
 
-    pub fn with_tools(mut self, tools: Vec<Box<dyn Tool>>) -> Self {
-        self.tools = Some(tools);
+    pub fn with_tools(mut self, tools: Vec<ChatCompletionTools>) -> Self {
+        self.tools = tools;
         self
     }
 

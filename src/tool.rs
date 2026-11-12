@@ -23,9 +23,11 @@ pub mod failing_tools;
 pub mod code;
 pub mod agent_tool;
 pub mod github_stars;
+pub mod transfer;
 
 pub use agent_tool::AgentTool;
 pub use github_stars::GithubStarsTool;
+pub use transfer::TransferTool;
 
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {

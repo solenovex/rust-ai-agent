@@ -12,6 +12,9 @@ pub mod act;
 pub mod step;
 pub mod think;
 
+/// 一次执行中允许的最大转移次数，防止 agent 之间无限来回转移。
+const MAX_TRANSFERS: usize = 8;
+
 impl Agent {
     /// 在已有的上下文上运行循环。工作流内部会调用它。
     pub async fn run_in_context(
@@ -30,6 +33,53 @@ impl Agent {
             match self.step(&client, &mut context).await? {
                 StepResult::Continue => {
                     context.increment_step();
+
+                    // 一步结束后检查转移请求。此时 transfer_to_agent 的
+                    // tool_call/tool_result 已经写入 conversation，接手的
+                    // agent 会在下一次 LLM 请求中看到完整的交接过程。
+                    if let Some(target_name) = context.transfer_to.take() {
+                        if context.transfer_count >= MAX_TRANSFERS {
+                            anyhow::bail!(
+                                "agent transfer exceeded the maximum of {MAX_TRANSFERS} handoffs"
+                            );
+                        }
+
+                        let next_agent =
+                            self.find_transfer_target(&target_name).ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "agent '{}' cannot transfer to '{}'; allowed targets: {:?}",
+                                    self.name,
+                                    target_name,
+                                    self.transfer_targets()
+                                        .iter()
+                                        .map(|agent| agent.name.clone())
+                                        .collect::<Vec<_>>()
+                                )
+                            })?;
+
+                        // 每个 agent 有自己的步数预算；会话/事件则完全共享。
+                        context.current_step = 0;
+                        context.transfer_count += 1;
+                        context
+                            .transfer_history
+                            .push(format!("{} -> {}", self.name, next_agent.name));
+
+                        tracing::info!(
+                            "Transferring control: {} -> {} (handoff #{})",
+                            self.name,
+                            next_agent.name,
+                            context.transfer_count
+                        );
+
+                        // 交接前保存一次，避免接手的 agent 中途失败时丢失会话。
+                        self.session_manager.save(context.session.clone()).await?;
+
+                        // 递归调用会产生无限大小的 Future，必须装箱。
+                        // 返回下一个 agent 的结果，意味着控制权已经彻底交给它，
+                        // 原 agent 不再回复用户。
+                        return Box::pin(next_agent.run_in_context(context)).await;
+                    }
+
                     if !context.session.pending_tool_calls.is_empty() {
                         self.session_manager.save(context.session.clone()).await?;
                         return Ok(AgentResult::new(

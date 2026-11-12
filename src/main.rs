@@ -1,6 +1,8 @@
-//! Multi-agent workflow demos. Pick a mode on the command line:
+//! Multi-agent demos. Pick a mode on the command line:
 //!
-//!   cargo run                          # same as `sequential`, default prompt
+//!   cargo run                          # same as `transfer`, default prompt
+//!   cargo run -- transfer              # router 把对话交接给 math / search 专家
+//!   cargo run -- transfer <prompt>     # 同上，使用自己的问题
 //!   cargo run -- sequential            # researcher -> writer -> editor
 //!   cargo run -- sequential <prompt>   # same, with your own topic
 //!   cargo run -- parallel              # optimist / pessimist / realist at once
@@ -16,6 +18,11 @@
 //!
 //!   cargo run -- parallel 评估我的 AI 教育平台创业想法
 //!
+//! transfer: the router calls the `transfer_to_agent` tool and hands control to
+//!   a specialist. Unlike agent-tool, the specialist works in the SAME session,
+//!   so it sees the router's handoff and the whole conversation. The specialist
+//!   answers the user directly; control does not return to the router.
+//!
 //! sequential: only the researcher has tools (search etc.). Each agent sees
 //!   the previous agent's work through the shared context.
 //! parallel: three agents with no tools run concurrently on copies of the same
@@ -30,7 +37,8 @@
 //!   outside it is still a single node. NOTE: this makes many LLM calls (research
 //!   steps + 3 analysts + up to 3 write/review rounds + editor).
 //!
-//! All modes end by printing the result and the author of every event.
+//! All modes end by printing the result, the transfer path (if any), and the
+//! author of every event.
 
 use std::sync::Arc;
 
@@ -49,8 +57,8 @@ use study_agent::{
         },
     },
     tool::{
-        AgentTool, GithubStarsTool, ToolBox, build_toolbox, code::register_code_tools,
-        final_answer::FinalAnswerTool, web_search::WebSearchTool,
+        AgentTool, GithubStarsTool, ToolBox, build_toolbox, calculator::CalculatorTool,
+        code::register_code_tools, final_answer::FinalAnswerTool, web_search::WebSearchTool,
     },
 };
 use uuid::Uuid;
@@ -90,6 +98,13 @@ fn report(result: &AgentResult<serde_json::Value>) -> anyhow::Result<()> {
         Some(serde_json::Value::String(text)) => println!("Result:\n{text}"),
         Some(other) => println!("Result:\n{}", serde_json::to_string_pretty(other)?),
         None => println!("Result: (no output)"),
+    }
+
+    if !result.context.transfer_history.is_empty() {
+        println!("\nTransfer path:");
+        for hop in &result.context.transfer_history {
+            println!("- {hop}");
+        }
     }
 
     println!("\nEvent authors:");
@@ -449,6 +464,85 @@ async fn run_agent_tool_demo(prompt: Option<String>) -> anyhow::Result<()> {
     report(&result)
 }
 
+// ---------- 演示 6: Agent Transfer ----------
+
+const TRANSFER_ROUTER_INSTRUCTIONS: &str = "\
+你是前台调度员。请用中文思考，但不要直接回答用户。
+你的唯一工具是 transfer_to_agent，它会把整段对话交给最合适的专家。
+路由规则:
+- 数学、算术、单位换算、数据计算 -> math
+- 需要联网检索的事实、新闻、资料 -> search
+规则:
+1. 判断领域后立即调用 transfer_to_agent，agent_name 填写目标专家名。
+2. 不要自己回答，也不要向用户解释路由过程；专家会直接接手。
+3. 一次只转移给一个专家。";
+
+const TRANSFER_MATH_INSTRUCTIONS: &str = "\
+你是数学专家。请用中文回答。
+规则:
+1. 使用 calculator 工具完成计算，不要心算。
+2. 如果用户的问题还包含需要联网检索的部分，先完成数学部分，然后调用
+   transfer_to_agent 把后续检索交给 search；计算结果会留在对话历史里。
+3. 如果数学部分就是全部任务，直接给出简洁答案和计算过程。
+4. 不要编造数据，不要回答与数学无关的内容。";
+
+const TRANSFER_SEARCH_INSTRUCTIONS: &str = "\
+你是资料检索专家。请用中文回答。
+规则:
+1. 使用 web_search 查找最新资料，query 要具体。
+2. 对话历史里可能已有其他专家（例如数学专家）的结论。最终回答要保留这些
+   结论，不要重复计算，也不要假装自己完成了计算。
+3. 用要点回答，并标注来源 URL。";
+
+/// 演示 Transfer 模式：router 通过 `transfer_to_agent` 把控制权交给专家。
+///
+/// 与 Agent as Tool 的关键区别：
+/// - 专家和 router 共享同一个 session，能看到完整的转接记录和用户问题；
+/// - 专家直接回复用户，控制权不会回到 router；
+/// - 如果专家解决不了后续问题，还可以继续转给父节点或兄弟节点。
+///
+/// 想观察“兄弟节点转移”，可以运行两段式问题：
+///
+/// ```text
+/// cargo run -- transfer 请先计算 2 的 20 次方，然后搜索 Rust 1.90 的发布日期
+/// ```
+///
+/// 预期控制路径是 `router -> math -> search`，search 的最终回答会引用 math
+/// 已经算出的结果，证明上下文被完整继承。
+async fn run_transfer_demo(prompt: Option<String>) -> anyhow::Result<()> {
+    let prompt = prompt.unwrap_or_else(|| "请计算 1234 × 5678 再加 90，结果是多少？".to_owned());
+
+    // 数学专家：只带 calculator。
+    let mut math_tools = ToolBox::new();
+    math_tools.insert("calculator".to_owned(), Box::new(CalculatorTool));
+    let math = Arc::new(
+        make_agent("math", TRANSFER_MATH_INSTRUCTIONS, math_tools, 5)
+            .with_description("数学计算专家。适合算术、单位换算、数据分析等需要精确计算的请求。"),
+    );
+
+    // 检索专家：只带 web_search。
+    let mut search_tools = ToolBox::new();
+    search_tools.insert("web_search".to_owned(), Box::new(WebSearchTool));
+    let search = Arc::new(
+        make_agent("search", TRANSFER_SEARCH_INSTRUCTIONS, search_tools, 5)
+            .with_description("资料检索专家。适合需要最新事实、新闻、来源或联网查证的请求。"),
+    );
+
+    // Router 自己不执行业务，只负责把控制权交给子节点。
+    let router = Arc::new(
+        make_agent("router", TRANSFER_ROUTER_INSTRUCTIONS, ToolBox::new(), 3)
+            .with_description("前台调度员，负责把用户请求转交给最合适的专家。"),
+    );
+
+    // 组装 agent 树：router 是父节点，math/search 是子节点。
+    // Rust 中必须先有 Arc<router>，才能给子节点建立 Weak<parent>。
+    router.set_sub_agents(vec![math, search])?;
+
+    let context = new_root_context(&router).await?;
+    let result = router.execute(Some(prompt), context).await?;
+    report(&result)
+}
+
 // ---------- entry ----------
 
 #[tokio::main]
@@ -460,18 +554,19 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let mut args = std::env::args().skip(1);
-    let mode = args.next().unwrap_or_else(|| "sequential".to_owned());
+    let mode = args.next().unwrap_or_else(|| "transfer".to_owned());
     let prompt = args.collect::<Vec<_>>().join(" ");
     let prompt = (!prompt.is_empty()).then_some(prompt);
 
     match mode.as_str() {
+        "transfer" => run_transfer_demo(prompt).await,
         "sequential" => run_sequential_demo(prompt).await,
         "parallel" => run_parallel_demo(prompt).await,
         "loop" => run_loop_demo(prompt).await,
         "composite" => run_composite_demo(prompt).await,
         "agent-tool" => run_agent_tool_demo(prompt).await,
         other => anyhow::bail!(
-            "unknown mode '{other}', use 'sequential', 'parallel', 'loop', 'composite' or 'agent-tool'"
+            "unknown mode '{other}', use 'transfer', 'sequential', 'parallel', 'loop', 'composite' or 'agent-tool'"
         ),
     }
 }

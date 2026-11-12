@@ -8,3 +8,4 @@ pub const TEXT_EMBEDDING_3_SMALL_MODEL: &str = "openai/text-embedding-3-small";
 
 pub const AGENT_NAME: &str = "study-agent";
 pub const FINAL_ANSWER_TOOL_NAME: &str = "final_answer";
+pub const TRANSFER_TOOL_NAME: &str = "transfer_to_agent";
