@@ -34,6 +34,18 @@ impl Agent {
                 StepResult::Continue => {
                     context.increment_step();
 
+                    // 审批优先于转移：如果同一步里既请求了危险工具又请求了
+                    // transfer，当前 agent 必须先处理审批，否则 pending 会
+                    // 留在错误的 agent 上。
+                    if !context.session.pending_tool_calls.is_empty() {
+                        self.session_manager.save(context.session.clone()).await?;
+                        return Ok(AgentResult::new(
+                            None,
+                            context,
+                            AgentStatus::PendingConfirmation,
+                        ));
+                    }
+
                     // 一步结束后检查转移请求。此时 transfer_to_agent 的
                     // tool_call/tool_result 已经写入 conversation，接手的
                     // agent 会在下一次 LLM 请求中看到完整的交接过程。
@@ -78,15 +90,6 @@ impl Agent {
                         // 返回下一个 agent 的结果，意味着控制权已经彻底交给它，
                         // 原 agent 不再回复用户。
                         return Box::pin(next_agent.run_in_context(context)).await;
-                    }
-
-                    if !context.session.pending_tool_calls.is_empty() {
-                        self.session_manager.save(context.session.clone()).await?;
-                        return Ok(AgentResult::new(
-                            None,
-                            context,
-                            AgentStatus::PendingConfirmation,
-                        ));
                     }
                 }
                 StepResult::Final(final_result) => {

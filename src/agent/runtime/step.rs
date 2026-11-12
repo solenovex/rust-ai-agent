@@ -32,7 +32,7 @@ impl Agent {
                 return Ok(StepResult::Final(output));
             }
         } else if let Some(content) = response_message.content {
-            println!(" AI> {content}");
+            tracing::debug!("assistant content: {content}");
             context.session.add_event(AgentEvent::new(
                 context.execution_id.clone(),
                 self.name.clone(),

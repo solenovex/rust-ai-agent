@@ -1,572 +1,721 @@
-//! Multi-agent demos. Pick a mode on the command line:
+//! 终端交互式 AI Agent。
 //!
-//!   cargo run                          # same as `transfer`, default prompt
-//!   cargo run -- transfer              # router 把对话交接给 math / search 专家
-//!   cargo run -- transfer <prompt>     # 同上，使用自己的问题
-//!   cargo run -- sequential            # researcher -> writer -> editor
-//!   cargo run -- sequential <prompt>   # same, with your own topic
-//!   cargo run -- parallel              # optimist / pessimist / realist at once
-//!   cargo run -- parallel <prompt>     # same, with your own idea to evaluate
-//!   cargo run -- loop                  # writer <-> reviewer until score >= 85 (max 4 rounds)
-//!   cargo run -- loop <prompt>         # same, with your own copywriting task
-//!   cargo run -- composite             # researcher -> [3 analysts in parallel] -> [writer <-> reviewer loop] -> editor
-//!   cargo run -- composite <prompt>    # same, with your own report topic
-//!   cargo run -- agent-tool            # 协调员把 researcher / coder 当作工具调用
-//!   cargo run -- agent-tool <prompt>   # 同上，使用自定义的调研与编码任务
-//!
-//! The prompt is everything after the mode, so no quotes are needed:
-//!
-//!   cargo run -- parallel 评估我的 AI 教育平台创业想法
-//!
-//! transfer: the router calls the `transfer_to_agent` tool and hands control to
-//!   a specialist. Unlike agent-tool, the specialist works in the SAME session,
-//!   so it sees the router's handoff and the whole conversation. The specialist
-//!   answers the user directly; control does not return to the router.
-//!
-//! sequential: only the researcher has tools (search etc.). Each agent sees
-//!   the previous agent's work through the shared context.
-//! parallel: three agents with no tools run concurrently on copies of the same
-//!   context. Their new events are merged in agent order, and the output has
-//!   one `[name]` section per agent.
-//!
-//! loop: a writer drafts, a reviewer scores it (structured output via the
-//!   final_answer tool). The loop repeats until the score reaches PASS_SCORE or
-//!   max iterations is hit. The final output is the reviewer's last Review.
-//!
-//! composite: all three workflows nested in one Sequential pipeline. From the
-//!   outside it is still a single node. NOTE: this makes many LLM calls (research
-//!   steps + 3 analysts + up to 3 write/review rounds + editor).
-//!
-//! All modes end by printing the result, the transfer path (if any), and the
-//! author of every event.
+//! 这是一个行式 REPL，不进入 alternate screen：
+//! - 正常使用终端滚动和复制粘贴；
+//! - 助手回答用 Markdown 渲染；
+//! - 支持 transfer、工具审批、长期记忆、沙箱、MCP 和上下文优化。
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    io::{self, IsTerminal, Write},
+    sync::Arc,
+};
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use study_agent::{
     agent::{
-        context::ExecutionContext,
-        model::{Agent, AgentResult, AgentStatus},
-    },
-    constant::{FINAL_ANSWER_TOOL_NAME, GPT_6_LUNA_PRO_MODEL},
-    multi_agent::{
-        node::AgentNode,
-        workflow::{
-            r#loop::LoopWorkflow, parallel::ParallelWorkflow, sequential::SequentialWorkflow,
+        callback::{
+            after_tool_callback::search_compressor::SearchCompressor,
+            before_llm_callback::{
+                context_optimizer::ContextOptimizer, memory_injection::MemoryInjectionCallback,
+            },
         },
+        context::ExecutionContext,
+        event::{ContentItem, ToolResultStatus},
+        model::{Agent, AgentStatus},
+        runtime::push_user_message,
+        tool_confirmation::ToolConfirmation,
     },
+    constant::{GPT_6_LUNA_PRO_MODEL, TEXT_EMBEDDING_3_SMALL_MODEL},
+    memory::memory_manager::TaskMemoryManager,
     tool::{
-        AgentTool, GithubStarsTool, ToolBox, build_toolbox, calculator::CalculatorTool,
-        code::register_code_tools, final_answer::FinalAnswerTool, web_search::WebSearchTool,
+        GithubStarsTool, ToolBox, build_basic_toolbox, build_toolbox, code::register_code_tools,
+        file::list::ListFileTool, file::read::ReadFileTool, memory_tool::RecallMemoryTool,
     },
 };
+use termimad::MadSkin;
 use uuid::Uuid;
 
-// ---------- shared helpers ----------
+const MEMORY_DB: &str = ".study-agent/memory.db";
+const HISTORY_LIMIT: usize = 20;
 
-fn make_agent(name: &str, instructions: &str, toolbox: ToolBox, max_steps: usize) -> Agent {
-    Agent::new(
-        GPT_6_LUNA_PRO_MODEL.to_owned(),
-        vec![instructions.to_owned()],
-        Arc::new(toolbox),
-    )
-    .with_name(name.to_owned())
-    .with_max_steps(max_steps)
-}
+const HELP: &str = "\
+# 交互命令
 
-/// Root context, built once by the caller (same as Agent::run does).
-async fn new_root_context(agent: &Agent) -> anyhow::Result<ExecutionContext> {
-    let session_id = Uuid::new_v4().to_string();
-    let session = agent
-        .session_manager
-        .get_or_create(&session_id, None)
-        .await?;
-    Ok(ExecutionContext::new(session))
-}
+- `/help` 显示帮助
+- `/new` 开始一个新会话
+- `/status` 查看模型、会话和功能状态
+- `/agents` 查看 agent 树和转移目标
+- `/tools` 查看每个 agent 的工具
+- `/history [n]` 查看最近 n 条事件，默认 20
+- `/remember` 把当前会话提取为长期记忆
+- `/clear` 清屏并重画横幅
+- `/quit` 退出
 
-fn report(result: &AgentResult<serde_json::Value>) -> anyhow::Result<()> {
-    match result.status {
-        AgentStatus::Complete => {}
-        AgentStatus::PendingConfirmation => anyhow::bail!(
-            "a tool needs confirmation; workflows don't resume yet, remove that tool"
-        ),
-        status => anyhow::bail!("workflow stopped with status {status:?}"),
-    }
+直接输入问题即可。输入以 `\\` 结尾时，可以继续下一行。
+也可以一次性执行：`cargo run -- 你的问题`。
 
-    match &result.output {
-        Some(serde_json::Value::String(text)) => println!("Result:\n{text}"),
-        Some(other) => println!("Result:\n{}", serde_json::to_string_pretty(other)?),
-        None => println!("Result: (no output)"),
-    }
+## 能力
 
-    if !result.context.transfer_history.is_empty() {
-        println!("\nTransfer path:");
-        for hop in &result.context.transfer_history {
-            println!("- {hop}");
-        }
-    }
+- `transfer_to_agent`：把控制权交给 researcher / math / coder
+- 工具审批：危险工具执行前会暂停并询问
+- 长期记忆：`/remember` 保存，之后自动检索
+- Markdown：回答按终端 Markdown 渲染
+";
 
-    println!("\nEvent authors:");
-    for ev in &result.context.session.events {
-        println!("- {}", ev.author);
-    }
-    Ok(())
-}
+const ROOT_INSTRUCTIONS: &str = "\
+你是运行在终端里的通用 AI 助手。请用中文回答，回答使用 Markdown。
 
-// ---------- demo 1: sequential ----------
+你的团队:
+- researcher: 联网搜索、GitHub 数据、最新资料
+- math: 数学计算
+- coder: 沙箱内 Python / Bash / 文件执行，以及技能
+
+工作规则:
+1. 需要最新网络资料时，调用 transfer_to_agent(\"researcher\")。
+2. 需要精确数学计算时，调用 transfer_to_agent(\"math\")。
+3. 需要执行代码、使用沙箱或技能时，调用 transfer_to_agent(\"coder\")。
+4. 文件、规划、反思、记忆、MCP 工具可以直接使用。
+5. 能自己完成的任务不要转移；转移后由专家直接回答用户。
+6. 不确定时先查证或调用工具，不要编造事实和链接。";
 
 const RESEARCHER_INSTRUCTIONS: &str = "\
-你是研究员。请用中文回答。
-1. 使用搜索工具查找主题的最新资料,不要用相似关键词重复搜索同一个话题。
-2. 最多使用 12 步;接近上限时,基于已有资料直接给出结果。
-3. 只输出要点列表,并在每个要点后标注来源。";
-
-/// composite 专用的研究员指令：限制搜索次数，要求收尾，并标注时效。
-const COMPOSITE_RESEARCHER_INSTRUCTIONS: &str = "\
-你是研究员。请用中文回答。当前时间是 2026 年 11 月。
-1. 使用搜索工具查找主题的最新资料,优先使用最近一年的资料,不要用相似关键词重复搜索同一个话题。
-2. 最多搜索 4 次;搜索完成后立即基于已有资料输出结果,不要再规划或反思。
-3. 只输出要点列表,并在每个要点后标注来源链接(只使用搜索结果中出现过的 URL)。";
-
-const WRITER_INSTRUCTIONS: &str = "\
-你是写作者。请用中文,只基于前面研究员提供的要点和来源,写一篇 5 段左右的博客文章。
-不要编造研究结果中没有的内容。只使用研究员提供的来源链接,不要自行补充 URL。";
-
-const EDITOR_INSTRUCTIONS: &str = "\
-你是编辑。请用中文审阅前面的文章,只修正语法并提升可读性。
-不要新增内容,不要改变文章结构和长度,输出最终定稿。";
-
-async fn run_sequential_demo(prompt: Option<String>) -> anyhow::Result<()> {
-    let prompt = prompt.unwrap_or_else(|| "写一篇关于 AI Agent 最新趋势的文章".to_owned());
-
-    // Only the researcher gets real tools (search etc.).
-    let researcher_tools = build_toolbox().await?;
-    tracing::info!(
-        "researcher tools: {:?}",
-        researcher_tools.keys().collect::<Vec<_>>()
-    );
-
-    let researcher = make_agent("researcher", RESEARCHER_INSTRUCTIONS, researcher_tools, 8);
-    let writer = make_agent("writer", WRITER_INSTRUCTIONS, ToolBox::new(), 3);
-    let editor = make_agent("editor", EDITOR_INSTRUCTIONS, ToolBox::new(), 3);
-
-    let context = new_root_context(&researcher).await?;
-
-    let workflow = SequentialWorkflow::new(vec![
-        Arc::new(researcher) as Arc<dyn AgentNode>,
-        Arc::new(writer),
-        Arc::new(editor),
-    ]);
-
-    let result = workflow.execute(Some(prompt), context).await?;
-    report(&result)
-}
-
-// ---------- demo 2: parallel ----------
-
-const OPTIMIST_INSTRUCTIONS: &str = "\
-你是乐观派分析师。请用中文,从积极的角度分析,聚焦机会和可能性。不超过 5 个要点。";
-
-const PESSIMIST_INSTRUCTIONS: &str = "\
-你是悲观派分析师。请用中文,聚焦风险和潜在问题进行分析。不超过 5 个要点。";
-
-const REALIST_INSTRUCTIONS: &str = "\
-你是务实派分析师。请用中文,从平衡的角度分析实际可行性。不超过 5 个要点。";
-
-async fn run_parallel_demo(prompt: Option<String>) -> anyhow::Result<()> {
-    let prompt = prompt.unwrap_or_else(|| "评估我的 AI 教育平台创业想法".to_owned());
-
-    let optimist = make_agent("optimist", OPTIMIST_INSTRUCTIONS, ToolBox::new(), 3);
-    let pessimist = make_agent("pessimist", PESSIMIST_INSTRUCTIONS, ToolBox::new(), 3);
-    let realist = make_agent("realist", REALIST_INSTRUCTIONS, ToolBox::new(), 3);
-
-    let context = new_root_context(&optimist).await?;
-
-    let workflow = ParallelWorkflow::new(vec![
-        Arc::new(optimist) as Arc<dyn AgentNode>,
-        Arc::new(pessimist),
-        Arc::new(realist),
-    ]);
-
-    let result = workflow.execute(Some(prompt), context).await?;
-    report(&result)
-}
-
-// ---------- demo 3: loop ----------
-
-/// What the reviewer returns through the final_answer tool.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct Review {
-    /// The exact text that was reviewed (the latest draft).
-    content: String,
-    /// Quality score from 0 to 100.
-    score: u32,
-    /// Concrete, actionable suggestions for improvement.
-    feedback: String,
-}
-
-const PASS_SCORE: u32 = 85;
-
-const LOOP_WRITER_INSTRUCTIONS: &str = "\
-你是文案写作者。请用中文写营销文案。
-如果前面的对话里已有评审员的反馈,请根据最新反馈改进上一版文案。只输出新的文案。";
-
-const LOOP_REVIEWER_INSTRUCTIONS: &str = "\
-你是严格的文案评审员。请用中文,评审写作者的最新一版文案,从清晰度、说服力、语法三方面打分(0-100,85 分以上才算优秀)。
-content 字段填入你评审的文案原文;feedback 字段给出具体、可执行的改进建议。
-content、score、feedback 三个字段必须全部填写,缺一不可;score 取清晰度、说服力、语法三项分数的平均值(四舍五入)。
-必须调用 final_answer 返回结果。";
-
-/// Stop when the reviewer's score reaches PASS_SCORE.
-fn quality_reached(result: &AgentResult<serde_json::Value>, iteration: usize) -> bool {
-    let Some(value) = &result.output else {
-        return false;
-    };
-    match serde_json::from_value::<Review>(value.clone()) {
-        Ok(review) => {
-            tracing::info!("iteration {iteration}: score {}", review.score);
-            review.score >= PASS_SCORE
-        }
-        Err(err) => {
-            tracing::warn!("iteration {iteration}: could not parse Review: {err}");
-            false
-        }
-    }
-}
-
-async fn run_loop_demo(prompt: Option<String>) -> anyhow::Result<()> {
-    let prompt = prompt
-        .unwrap_or_else(|| "为一款面向小学生的 AI 数学辅导 App 写一段营销文案".to_owned());
-
-    let writer = make_agent("writer", LOOP_WRITER_INSTRUCTIONS, ToolBox::new(), 3);
-
-    let mut reviewer_tools = ToolBox::new();
-    reviewer_tools.insert(
-        FINAL_ANSWER_TOOL_NAME.to_owned(),
-        Box::new(FinalAnswerTool::<Review>::new()),
-    );
-    let reviewer = make_agent("reviewer", LOOP_REVIEWER_INSTRUCTIONS, reviewer_tools, 3);
-
-    let context = new_root_context(&writer).await?;
-
-    let workflow = LoopWorkflow::new(
-        vec![Arc::new(writer) as Arc<dyn AgentNode>, Arc::new(reviewer)],
-        4, // max iterations
-    )
-    .with_stop_condition(quality_reached);
-
-    // Other ways to stop (swap in for `.with_stop_condition(quality_reached)`):
-    //   keyword:  .with_stop_condition(|r, _| r.output.as_ref().is_some_and(|v| v.to_string().contains("APPROVED")))
-    //   length:   .with_stop_condition(|r, i| i >= 3 && r.output.as_ref().map_or(0, |v| v.to_string().chars().count()) > 1000)
-
-    let result = workflow.execute(Some(prompt), context).await?;
-    report(&result)
-}
-
-// ---------- demo 4: composite ----------
-
-fn analyst_instructions(role: &str, angle: &str) -> String {
-    format!(
-        "你是{role}分析师。请用中文,基于前面研究员提供的资料,{angle}。不超过 5 个要点。"
-    )
-}
-
-const REPORT_WRITER_INSTRUCTIONS: &str = "\
-你是报告写作者。请用中文,综合研究员的资料以及乐观、悲观、务实三方的分析,写一份 4-5 段的市场分析报告。
-如果前面的对话里已有评审员的反馈,请根据最新反馈改进上一版报告。只使用研究员提供的来源链接,不要自行补充 URL。只输出报告正文。";
-
-const REPORT_REVIEWER_INSTRUCTIONS: &str = "\
-你是严格的报告评审员。请用中文,评审写作者的最新一版报告,从是否忠于资料、结构、清晰度三方面打分(0-100,85 分以上才算优秀)。
-content 字段填入你评审的报告原文;feedback 字段给出具体、可执行的改进建议。
-content、score、feedback 三个字段必须全部填写,缺一不可;score 取忠于资料、结构、清晰度三项分数的平均值(四舍五入)。
-必须调用 final_answer 返回结果。";
-
-const REPORT_EDITOR_INSTRUCTIONS: &str = "\
-你是编辑。请用中文,审阅最新一版报告(评审员 content 字段中的正文),只修正语法并提升可读性。
-不要新增内容,直接输出最终定稿。";
-
-async fn run_composite_demo(prompt: Option<String>) -> anyhow::Result<()> {
-    let prompt = prompt.unwrap_or_else(|| "写一份关于 AI Agent 市场的分析报告".to_owned());
-
-    // Stage 1: research (the only agent with real tools).
-    let mut researcher_tools = build_toolbox().await?;
-    // 规划与反思工具会消耗步数，composite 的研究员只需要搜索。
-    researcher_tools.remove("create_tasks");
-    researcher_tools.remove("reflection");
-    let researcher = make_agent("researcher", COMPOSITE_RESEARCHER_INSTRUCTIONS, researcher_tools, 12);
-
-    // Stage 2: three perspectives at the same time.
-    let optimist = make_agent(
-        "optimist",
-        &analyst_instructions("乐观派", "从积极的角度分析机会和可能性"),
-        ToolBox::new(),
-        3,
-    );
-    let pessimist = make_agent(
-        "pessimist",
-        &analyst_instructions("悲观派", "聚焦风险和潜在问题进行分析"),
-        ToolBox::new(),
-        3,
-    );
-    let realist = make_agent(
-        "realist",
-        &analyst_instructions("务实派", "从平衡的角度分析实际可行性"),
-        ToolBox::new(),
-        3,
-    );
-    let perspectives = ParallelWorkflow::new(vec![
-        Arc::new(optimist) as Arc<dyn AgentNode>,
-        Arc::new(pessimist),
-        Arc::new(realist),
-    ])
-    .with_name("perspectives");
-
-    // Stage 3: write / review loop.
-    let writer = make_agent("writer", REPORT_WRITER_INSTRUCTIONS, ToolBox::new(), 3);
-    let mut reviewer_tools = ToolBox::new();
-    reviewer_tools.insert(
-        FINAL_ANSWER_TOOL_NAME.to_owned(),
-        Box::new(FinalAnswerTool::<Review>::new()),
-    );
-    let reviewer = make_agent("reviewer", REPORT_REVIEWER_INSTRUCTIONS, reviewer_tools, 3);
-    let revision = LoopWorkflow::new(
-        vec![Arc::new(writer) as Arc<dyn AgentNode>, Arc::new(reviewer)],
-        3, // max iterations
-    )
-    .with_name("revision")
-    .with_stop_condition(quality_reached);
-
-    // Stage 4: final polish.
-    let editor = make_agent("editor", REPORT_EDITOR_INSTRUCTIONS, ToolBox::new(), 3);
-
-    let context = new_root_context(&researcher).await?;
-
-    // Sequential -> Parallel -> Loop -> Agent, all behind the same trait.
-    let workflow = SequentialWorkflow::new(vec![
-        Arc::new(researcher) as Arc<dyn AgentNode>,
-        Arc::new(perspectives),
-        Arc::new(revision),
-        Arc::new(editor),
-    ])
-    .with_name("report_pipeline");
-
-    let result = workflow.execute(Some(prompt), context).await?;
-    report(&result)
-}
-
-// ---------- 演示 5: Agent as Tool ----------
-
-const AGENT_TOOL_RESEARCHER_INSTRUCTIONS: &str = "\
-你是研究专员。请用中文回答。
-工作方式:
-1. 先调用 github_stars 工具,一次查询任务中提到的所有 GitHub 仓库,repos 参数传 \"owner/repo\" 列表。
-2. 只有需要补充框架简介或确认仓库归属时,才使用 web_search,最多 2 次。
-3. 最终只返回一个 Markdown 表格,列为:框架 | GitHub 仓库 | Star 数 | 来源 URL。
-   - Star 数必须使用 github_stars 返回的精确值,不要使用搜索结果摘要、排行榜或旧讨论帖里的数字。
-   - 来源 URL 使用 github_stars 返回的仓库 URL。
-   - 某个仓库查询失败时,Star 数写“查询失败”,并在来源 URL 写错误原因。
-4. 不要输出搜索过程,也不要编造数据。";
-
-const AGENT_TOOL_CODER_INSTRUCTIONS: &str = "\
-你是 Python 专家。请用中文回答。
-调用方会在 request 中提供一份调研表格(框架、GitHub 仓库、Star 数)。
-严格要求:
-1. 只使用 request 中给出的数据,把它们硬编码到脚本里。
-2. 禁止访问网络、禁止调用 GitHub API、禁止安装第三方库,只使用 Python 标准库。
-3. 脚本输出 Markdown 表格和 ASCII 柱状图。
-4. 执行脚本,返回一次完整代码和真实运行输出;不要重复解释同一段代码。
-5. 如果执行失败,返回错误信息,不要编造运行结果。";
-
-const AGENT_TOOL_COORDINATOR_INSTRUCTIONS: &str = "\
-你是项目协调员。请用中文回答。
-工作流程固定如下:
-1. 先调用 researcher,获取一份“框架 | GitHub 仓库 | Star 数 | 来源 URL”的表格。
-2. 再调用 coder,把 researcher 返回的完整表格原样放进 request,要求它用这些数据生成 Markdown 表格、ASCII 柱状图和可运行脚本。
-3. 最终回答只包含以下内容,不要重复 coder 的整段解释:
-   - 最终 Markdown 表格
-   - ASCII 柱状图
-   - 一份完整 Python 脚本(只出现一次)
-   - 一句关于数据来源和 Star 数会变化的说明
-注意:
-- coder 不联网,所有数字必须来自 researcher。
-- 不要自己编造 Star 数或 URL。";
-
-/// 演示 Agent as Tool: coordinator 的 toolbox 里放的是另外两个 Agent。
-///
-/// 与 workflow 的关键区别:子代理在独立 session 中运行,coordinator 只看到
-/// 它们的最终输出,看不到中间的工具调用和推理过程。
-async fn run_agent_tool_demo(prompt: Option<String>) -> anyhow::Result<()> {
-    let prompt = prompt.unwrap_or_else(|| {
-        "调研最新的 AI Agent 框架(如 LangGraph、CrewAI、AutoGen),\
-         并写一个 Python 脚本比较它们的 GitHub star 数"
-            .to_owned()
-    });
-
-    // 1) 研究专员:github_stars 精确取数,web_search 只补充背景。
-    let mut researcher_tools = ToolBox::new();
-    researcher_tools.insert("github_stars".to_owned(), Box::new(GithubStarsTool));
-    researcher_tools.insert("web_search".to_owned(), Box::new(WebSearchTool));
-    let researcher = Arc::new(
-        make_agent(
-            "researcher",
-            AGENT_TOOL_RESEARCHER_INSTRUCTIONS,
-            researcher_tools,
-            6,
-        )
-        .with_description(
-            "联网搜索并总结任意主题的最新资料。适合需要事实、来源或最新信息的任务。",
-        ),
-    );
-
-    // 2) 编码专员:拥有沙箱代码执行能力(需配置 CODE_EXECUTION)。
-    let mut coder_tools = ToolBox::new();
-    let sandbox_prompt = register_code_tools(&mut coder_tools).await?;
-    if coder_tools.is_empty() {
-        tracing::warn!(
-            "code execution is not configured; the coder agent can only write code, not run it"
-        );
-    }
-    let mut coder_instructions = AGENT_TOOL_CODER_INSTRUCTIONS.to_owned();
-    if !sandbox_prompt.is_empty() {
-        coder_instructions.push_str("\n\n");
-        coder_instructions.push_str(&sandbox_prompt);
-    }
-    let coder = Arc::new(
-        make_agent("coder", &coder_instructions, coder_tools, 8)
-            .with_description(
-                "编写并执行 Python 代码,用于数据分析和可视化。适合计算、统计或生成图表的任务。",
-            ),
-    );
-
-    // 3) 协调员:普通 toolbox,只是把两个 Agent 包装成 Tool。
-    //    子代理内部需要确认的工具(如 execute_python)由 AgentTool 自动批准。
-    let mut orchestrator_tools = ToolBox::new();
-    orchestrator_tools.insert(
-        "researcher".to_owned(),
-        Box::new(AgentTool::new(researcher)),
-    );
-    orchestrator_tools.insert(
-        "coder".to_owned(),
-        Box::new(AgentTool::new(coder).with_auto_approve_child_tools(true)),
-    );
-
-    let orchestrator = make_agent(
-        "coordinator",
-        AGENT_TOOL_COORDINATOR_INSTRUCTIONS,
-        orchestrator_tools,
-        8,
-    );
-
-    let context = new_root_context(&orchestrator).await?;
-    // Agent 本身实现了 AgentNode,所以可以直接作为单节点执行。
-    let result = orchestrator.execute(Some(prompt), context).await?;
-    report(&result)
-}
-
-// ---------- 演示 6: Agent Transfer ----------
-
-const TRANSFER_ROUTER_INSTRUCTIONS: &str = "\
-你是前台调度员。请用中文思考，但不要直接回答用户。
-你的唯一工具是 transfer_to_agent，它会把整段对话交给最合适的专家。
-路由规则:
-- 数学、算术、单位换算、数据计算 -> math
-- 需要联网检索的事实、新闻、资料 -> search
-规则:
-1. 判断领域后立即调用 transfer_to_agent，agent_name 填写目标专家名。
-2. 不要自己回答，也不要向用户解释路由过程；专家会直接接手。
-3. 一次只转移给一个专家。";
-
-const TRANSFER_MATH_INSTRUCTIONS: &str = "\
-你是数学专家。请用中文回答。
-规则:
-1. 使用 calculator 工具完成计算，不要心算。
-2. 如果用户的问题还包含需要联网检索的部分，先完成数学部分，然后调用
-   transfer_to_agent 把后续检索交给 search；计算结果会留在对话历史里。
-3. 如果数学部分就是全部任务，直接给出简洁答案和计算过程。
-4. 不要编造数据，不要回答与数学无关的内容。";
-
-const TRANSFER_SEARCH_INSTRUCTIONS: &str = "\
 你是资料检索专家。请用中文回答。
-规则:
-1. 使用 web_search 查找最新资料，query 要具体。
-2. 对话历史里可能已有其他专家（例如数学专家）的结论。最终回答要保留这些
-   结论，不要重复计算，也不要假装自己完成了计算。
-3. 用要点回答，并标注来源 URL。";
+1. 使用 web_search 查找最新资料，使用 github_stars 查询精确的 GitHub Star 数。
+2. 只使用搜索结果中出现过的链接，不要编造来源。
+3. 输出简洁的要点列表，并标注来源 URL。
+4. 如果问题还包含数学或代码部分，转交给 math 或 coder。";
 
-/// 演示 Transfer 模式：router 通过 `transfer_to_agent` 把控制权交给专家。
-///
-/// 与 Agent as Tool 的关键区别：
-/// - 专家和 router 共享同一个 session，能看到完整的转接记录和用户问题；
-/// - 专家直接回复用户，控制权不会回到 router；
-/// - 如果专家解决不了后续问题，还可以继续转给父节点或兄弟节点。
-///
-/// 想观察“兄弟节点转移”，可以运行两段式问题：
-///
-/// ```text
-/// cargo run -- transfer 请先计算 2 的 20 次方，然后搜索 Rust 1.90 的发布日期
-/// ```
-///
-/// 预期控制路径是 `router -> math -> search`，search 的最终回答会引用 math
-/// 已经算出的结果，证明上下文被完整继承。
-async fn run_transfer_demo(prompt: Option<String>) -> anyhow::Result<()> {
-    let prompt = prompt.unwrap_or_else(|| "请计算 1234 × 5678 再加 90，结果是多少？".to_owned());
+const MATH_INSTRUCTIONS: &str = "\
+你是数学专家。请用中文回答。
+1. 使用 calculator 工具计算，不要心算。
+2. 展示简要计算步骤，最终答案要明确。
+3. 不回答与数学无关的内容。";
 
-    // 数学专家：只带 calculator。
-    let mut math_tools = ToolBox::new();
-    math_tools.insert("calculator".to_owned(), Box::new(CalculatorTool));
-    let math = Arc::new(
-        make_agent("math", TRANSFER_MATH_INSTRUCTIONS, math_tools, 5)
-            .with_description("数学计算专家。适合算术、单位换算、数据分析等需要精确计算的请求。"),
-    );
+const CODER_INSTRUCTIONS: &str = "\
+你是代码与沙箱专家。请用中文回答。
+1. 使用 execute_python 或 bash_tool 在沙箱中运行代码。
+2. 需要读取文件时使用 read_file / list_file；需要上传文件时使用 upload_file。
+3. 代码出错时先分析错误，再修正并重新运行。
+4. 返回可运行的代码和真实执行结果，不要编造输出。";
 
-    // 检索专家：只带 web_search。
-    let mut search_tools = ToolBox::new();
-    search_tools.insert("web_search".to_owned(), Box::new(WebSearchTool));
-    let search = Arc::new(
-        make_agent("search", TRANSFER_SEARCH_INSTRUCTIONS, search_tools, 5)
-            .with_description("资料检索专家。适合需要最新事实、新闻、来源或联网查证的请求。"),
-    );
-
-    // Router 自己不执行业务，只负责把控制权交给子节点。
-    let router = Arc::new(
-        make_agent("router", TRANSFER_ROUTER_INSTRUCTIONS, ToolBox::new(), 3)
-            .with_description("前台调度员，负责把用户请求转交给最合适的专家。"),
-    );
-
-    // 组装 agent 树：router 是父节点，math/search 是子节点。
-    // Rust 中必须先有 Arc<router>，才能给子节点建立 Weak<parent>。
-    router.set_sub_agents(vec![math, search])?;
-
-    let context = new_root_context(&router).await?;
-    let result = router.execute(Some(prompt), context).await?;
-    report(&result)
+struct Features {
+    mcp: bool,
+    code: bool,
+    memory: bool,
+    skills: bool,
 }
 
-// ---------- entry ----------
+struct Callbacks {
+    optimizer: Arc<ContextOptimizer>,
+    memory_injection: Option<Arc<MemoryInjectionCallback>>,
+    search_compressor: Arc<SearchCompressor>,
+}
+
+impl Callbacks {
+    fn new(memory: Option<Arc<TaskMemoryManager>>) -> Self {
+        Self {
+            optimizer: Arc::new(ContextOptimizer::new(GPT_6_LUNA_PRO_MODEL)),
+            memory_injection: memory.map(|manager| Arc::new(MemoryInjectionCallback::new(manager))),
+            search_compressor: Arc::new(SearchCompressor),
+        }
+    }
+
+    fn decorate(&self, agent: Agent) -> Agent {
+        let mut agent = agent.with_before_llm_callbacks(self.optimizer.clone());
+        if let Some(callback) = &self.memory_injection {
+            agent = agent.with_before_llm_callbacks(callback.clone());
+        }
+        agent.with_after_tool_callbacks(self.search_compressor.clone())
+    }
+}
+
+struct App {
+    model: String,
+    session_id: String,
+    root: Arc<Agent>,
+    agents: HashMap<String, Arc<Agent>>,
+    context: ExecutionContext,
+    memory: Option<Arc<TaskMemoryManager>>,
+    features: Features,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("study_agent=info,rmcp=warn"));
     tracing_subscriber::fmt()
-        .with_target(true)
-        .with_max_level(tracing::Level::INFO)
+        .with_target(false)
+        .without_time()
+        .with_writer(io::stderr)
+        .with_env_filter(filter)
         .init();
 
-    let mut args = std::env::args().skip(1);
-    let mode = args.next().unwrap_or_else(|| "transfer".to_owned());
-    let prompt = args.collect::<Vec<_>>().join(" ");
-    let prompt = (!prompt.is_empty()).then_some(prompt);
-
-    match mode.as_str() {
-        "transfer" => run_transfer_demo(prompt).await,
-        "sequential" => run_sequential_demo(prompt).await,
-        "parallel" => run_parallel_demo(prompt).await,
-        "loop" => run_loop_demo(prompt).await,
-        "composite" => run_composite_demo(prompt).await,
-        "agent-tool" => run_agent_tool_demo(prompt).await,
-        other => anyhow::bail!(
-            "unknown mode '{other}', use 'transfer', 'sequential', 'parallel', 'loop', 'composite' or 'agent-tool'"
-        ),
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if matches!(args.first().map(String::as_str), Some("-h" | "--help")) {
+        render_markdown(HELP);
+        return Ok(());
     }
+
+    let mut app = build_app().await?;
+    print_banner(&app);
+
+    let one_shot = args.join(" ");
+    if !one_shot.trim().is_empty() {
+        run_turn(&mut app, one_shot).await?;
+        return Ok(());
+    }
+
+    loop {
+        let Some(input) = read_input()? else {
+            break;
+        };
+        let input = input.trim().to_owned();
+        if input.is_empty() {
+            continue;
+        }
+
+        if input.starts_with('/') {
+            if !handle_command(&mut app, &input).await? {
+                break;
+            }
+            continue;
+        }
+
+        if let Err(err) = run_turn(&mut app, input).await {
+            eprintln!("{} {err:#}", styled("error:", "1;31"));
+        }
+    }
+
+    println!("\nbye.");
+    Ok(())
+}
+
+async fn build_app() -> anyhow::Result<App> {
+    let model = GPT_6_LUNA_PRO_MODEL.to_owned();
+
+    let (mut available_tools, mcp) = match build_toolbox().await {
+        Ok(toolbox) => (toolbox, true),
+        Err(err) => {
+            eprintln!("warning: MCP unavailable ({err}); using local tools only");
+            (build_basic_toolbox(), false)
+        }
+    };
+    // 这个工具是镜像里故意失败的演示工具，交互模式不需要。
+    available_tools.remove("get_wikipedia_page");
+
+    let memory = match init_memory(&model) {
+        Ok(manager) => Some(Arc::new(manager)),
+        Err(err) => {
+            eprintln!("warning: long-term memory disabled: {err}");
+            None
+        }
+    };
+
+    let mut math_tools = ToolBox::new();
+    if let Some(calculator) = available_tools.remove("calculator") {
+        math_tools.insert("calculator".to_owned(), calculator);
+    }
+
+    let mut researcher_tools = ToolBox::new();
+    if let Some(web_search) = available_tools.remove("web_search") {
+        researcher_tools.insert("web_search".to_owned(), web_search);
+    }
+    researcher_tools.insert("github_stars".to_owned(), Box::new(GithubStarsTool));
+
+    let mut coder_tools = ToolBox::new();
+    let sandbox_prompt = match register_code_tools(&mut coder_tools).await {
+        Ok(prompt) => prompt,
+        Err(err) => {
+            eprintln!("warning: code execution disabled: {err}");
+            String::new()
+        }
+    };
+    coder_tools.insert("read_file".to_owned(), Box::new(ReadFileTool));
+    coder_tools.insert("list_file".to_owned(), Box::new(ListFileTool));
+
+    let code = coder_tools.contains_key("execute_python") || coder_tools.contains_key("bash_tool");
+    let skills = sandbox_prompt.contains("Available Skills");
+
+    for toolbox in [
+        &mut available_tools,
+        &mut researcher_tools,
+        &mut math_tools,
+        &mut coder_tools,
+    ] {
+        add_memory_tool(toolbox, &memory);
+    }
+
+    let callbacks = Callbacks::new(memory.clone());
+
+    let researcher = Arc::new(callbacks.decorate(make_agent(
+        "researcher",
+        "联网检索与 GitHub 数据专家",
+        RESEARCHER_INSTRUCTIONS.to_owned(),
+        researcher_tools,
+        12,
+    )));
+    let math = Arc::new(callbacks.decorate(make_agent(
+        "math",
+        "数学计算专家",
+        MATH_INSTRUCTIONS.to_owned(),
+        math_tools,
+        6,
+    )));
+
+    let mut coder_instructions = CODER_INSTRUCTIONS.to_owned();
+    if !sandbox_prompt.is_empty() {
+        coder_instructions.push_str("\n\n");
+        coder_instructions.push_str(&sandbox_prompt);
+    }
+    let coder = Arc::new(callbacks.decorate(make_agent(
+        "coder",
+        "代码执行与沙箱专家",
+        coder_instructions,
+        coder_tools,
+        12,
+    )));
+
+    let root = Arc::new(callbacks.decorate(make_agent(
+        "assistant",
+        "通用助手，负责理解任务并分派专家",
+        ROOT_INSTRUCTIONS.to_owned(),
+        available_tools,
+        24,
+    )));
+    root.set_sub_agents(vec![researcher.clone(), math.clone(), coder.clone()])?;
+
+    let agents = [
+        ("assistant", root.clone()),
+        ("researcher", researcher),
+        ("math", math),
+        ("coder", coder),
+    ]
+    .into_iter()
+    .map(|(name, agent)| (name.to_owned(), agent))
+    .collect();
+
+    let session_id = format!("chat-{}", Uuid::new_v4());
+    let session = root
+        .session_manager
+        .get_or_create(&session_id, None)
+        .await?;
+    let memory_enabled = memory.is_some();
+
+    Ok(App {
+        model,
+        session_id,
+        root,
+        agents,
+        context: ExecutionContext::new(session),
+        memory,
+        features: Features {
+            mcp,
+            code,
+            memory: memory_enabled,
+            skills,
+        },
+    })
+}
+
+fn init_memory(chat_model: &str) -> anyhow::Result<TaskMemoryManager> {
+    std::fs::create_dir_all(".study-agent")?;
+    TaskMemoryManager::new(MEMORY_DB, chat_model, TEXT_EMBEDDING_3_SMALL_MODEL)
+}
+
+fn add_memory_tool(toolbox: &mut ToolBox, memory: &Option<Arc<TaskMemoryManager>>) {
+    if let Some(manager) = memory {
+        toolbox.insert(
+            "recall_memory".to_owned(),
+            Box::new(RecallMemoryTool::new(manager.clone())),
+        );
+    }
+}
+
+fn make_agent(
+    name: &str,
+    description: &str,
+    instructions: String,
+    toolbox: ToolBox,
+    max_steps: usize,
+) -> Agent {
+    Agent::new(
+        GPT_6_LUNA_PRO_MODEL.to_owned(),
+        vec![instructions],
+        Arc::new(toolbox),
+    )
+    .with_name(name.to_owned())
+    .with_description(description.to_owned())
+    .with_max_steps(max_steps)
+}
+
+async fn run_turn(app: &mut App, input: String) -> anyhow::Result<()> {
+    push_user_message(&mut app.context, &input);
+    // 每个用户回合都是新的一次执行：步数、转移次数和转移路径重新计数。
+    app.context.current_step = 0;
+    app.context.transfer_count = 0;
+    app.context.transfer_history.clear();
+
+    let mut result = app.root.run_in_context(app.context.clone()).await?;
+    let mut approval_rounds = 0;
+
+    loop {
+        match result.status {
+            AgentStatus::Complete => {
+                let speaker = result
+                    .context
+                    .transfer_history
+                    .last()
+                    .and_then(|hop| hop.rsplit_once(" -> ").map(|(_, to)| to))
+                    .unwrap_or(&app.root.name)
+                    .to_owned();
+
+                if let Some(output) = result.output {
+                    let text = match output {
+                        serde_json::Value::String(text) => text,
+                        other => format!(
+                            "```json\n{}\n```",
+                            serde_json::to_string_pretty(&other).unwrap_or_default()
+                        ),
+                    };
+                    println!();
+                    println!("{}", styled(&format!("{speaker}>"), "1;32"));
+                    render_markdown(&text);
+                }
+
+                app.context = result.context;
+                app.root
+                    .session_manager
+                    .save(app.context.session.clone())
+                    .await?;
+                return Ok(());
+            }
+            AgentStatus::PendingConfirmation => {
+                approval_rounds += 1;
+                if approval_rounds > 5 {
+                    anyhow::bail!("too many tool approval rounds");
+                }
+
+                let active = active_agent(&result.context, &app.root, &app.agents);
+                let confirmations = prompt_confirmations(&result.context)?;
+                let mut context = result.context;
+                context.session.state.insert(
+                    "tool_confirmations".to_owned(),
+                    serde_json::to_value(&confirmations)?,
+                );
+
+                result = active.run_in_context(context).await?;
+            }
+            AgentStatus::Error => anyhow::bail!("agent stopped with an error"),
+        }
+    }
+}
+
+fn active_agent(
+    context: &ExecutionContext,
+    root: &Arc<Agent>,
+    agents: &HashMap<String, Arc<Agent>>,
+) -> Arc<Agent> {
+    context
+        .transfer_history
+        .last()
+        .and_then(|hop| hop.rsplit_once(" -> ").map(|(_, to)| to))
+        .and_then(|name| agents.get(name))
+        .cloned()
+        .unwrap_or_else(|| root.clone())
+}
+
+fn prompt_confirmations(context: &ExecutionContext) -> anyhow::Result<Vec<ToolConfirmation>> {
+    let pending = &context.session.pending_tool_calls;
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    println!("\n{}", styled("tool approval required", "1;33"));
+    let mut approve_all = false;
+    let mut confirmations = Vec::with_capacity(pending.len());
+
+    for call in pending {
+        let approved = if approve_all {
+            true
+        } else {
+            println!("{}", call.confirmation_message);
+            print!("[y] approve  [n] deny  [a] approve all: ");
+            io::stdout().flush()?;
+
+            let mut reply = String::new();
+            if io::stdin().read_line(&mut reply)? == 0 {
+                false
+            } else {
+                match reply.trim().to_lowercase().as_str() {
+                    "y" | "yes" => true,
+                    "a" | "all" => {
+                        approve_all = true;
+                        true
+                    }
+                    _ => false,
+                }
+            }
+        };
+
+        confirmations.push(ToolConfirmation {
+            tool_call_id: call.tool_call.id.clone(),
+            reason: Some(if approved {
+                "approved in terminal".to_owned()
+            } else {
+                "denied in terminal".to_owned()
+            }),
+            approved,
+            modified_arguments: None,
+        });
+    }
+
+    Ok(confirmations)
+}
+
+async fn handle_command(app: &mut App, input: &str) -> anyhow::Result<bool> {
+    let mut parts = input.split_whitespace();
+    let command = parts.next().unwrap_or_default();
+
+    match command {
+        "/quit" | "/exit" | "/q" => return Ok(false),
+        "/help" => render_markdown(HELP),
+        "/new" => {
+            let session_id = format!("chat-{}", Uuid::new_v4());
+            let session = app
+                .root
+                .session_manager
+                .get_or_create(&session_id, None)
+                .await?;
+            app.context = ExecutionContext::new(session);
+            app.session_id = session_id;
+            println!("new session: {}", app.session_id);
+        }
+        "/status" => println!("{}", status_text(app)),
+        "/agents" => render_markdown(&agents_markdown(&app.root)),
+        "/tools" => render_markdown(&tools_markdown(app)),
+        "/history" => {
+            let limit = parts
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(HISTORY_LIMIT);
+            print_history(&app.context, limit);
+        }
+        "/remember" | "/save" => remember(app).await?,
+        "/clear" => {
+            print!("\x1b[2J\x1b[H");
+            io::stdout().flush()?;
+            print_banner(app);
+        }
+        other => println!("unknown command: {other}. Type /help for help."),
+    }
+
+    Ok(true)
+}
+
+async fn remember(app: &mut App) -> anyhow::Result<()> {
+    let Some(memory) = &app.memory else {
+        println!("long-term memory is disabled");
+        return Ok(());
+    };
+
+    println!("extracting long-term memory...");
+    match memory.save(&app.context.session.events).await {
+        Ok(Some(id)) => println!("saved memory: {id}"),
+        Ok(None) => println!("nothing saved (duplicate, empty, or extraction failed)"),
+        Err(err) => println!("memory save failed: {err:#}"),
+    }
+    Ok(())
+}
+
+fn read_input() -> anyhow::Result<Option<String>> {
+    let mut buffer = String::new();
+    let terminal = io::stdout().is_terminal();
+
+    loop {
+        if terminal {
+            if buffer.is_empty() {
+                print!("\x1b[1;36myou>\x1b[0m ");
+            } else {
+                print!("\x1b[1;36m...>\x1b[0m ");
+            }
+            io::stdout().flush()?;
+        }
+
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line)? == 0 {
+            if buffer.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+
+        let line = line.trim_end_matches(&['\r', '\n'][..]);
+        if let Some(prefix) = line.strip_suffix('\\') {
+            buffer.push_str(prefix);
+            buffer.push('\n');
+            continue;
+        }
+
+        buffer.push_str(line);
+        break;
+    }
+
+    Ok(Some(buffer))
+}
+
+fn styled(text: &str, code: &str) -> String {
+    if io::stdout().is_terminal() {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    } else {
+        text.to_owned()
+    }
+}
+
+fn render_markdown(text: &str) {
+    if io::stdout().is_terminal() {
+        let skin = MadSkin::default();
+        skin.print_text(text.trim_end());
+        println!();
+    } else {
+        println!("{}", text.trim_end());
+    }
+}
+
+fn print_banner(app: &App) {
+    let memory = if app.features.memory { "on" } else { "off" };
+    let code = if app.features.code { "on" } else { "off" };
+    let mcp = if app.features.mcp { "on" } else { "off" };
+    let skills = if app.features.skills { "on" } else { "off" };
+
+    println!();
+    println!("{}  terminal assistant", styled("study-agent", "1;36"));
+    println!("model   : {}", app.model);
+    println!("session : {}", app.session_id);
+    println!("features: mcp={mcp}  code={code}  memory={memory}  skills={skills}  transfer=on");
+    let mut agent_names = app.agents.keys().cloned().collect::<Vec<_>>();
+    agent_names.sort();
+    println!("agents  : {}", agent_names.join(", "));
+    println!("commands: /help  /new  /status  /agents  /tools  /history  /remember  /quit");
+    println!();
+}
+
+fn status_text(app: &App) -> String {
+    let transfer = if app.context.transfer_history.is_empty() {
+        "(none)".to_owned()
+    } else {
+        app.context.transfer_history.join(", ")
+    };
+    format!(
+        "model: {}\nsession: {}\nevents: {}\nlast step: {}\ntransfers: {}\nfeatures: mcp={} code={} memory={} skills={}",
+        app.model,
+        app.session_id,
+        app.context.session.events.len(),
+        app.context.current_step,
+        transfer,
+        app.features.mcp,
+        app.features.code,
+        app.features.memory,
+        app.features.skills,
+    )
+}
+
+fn agents_markdown(root: &Agent) -> String {
+    fn walk(agent: &Agent, depth: usize, out: &mut String) {
+        let indent = "  ".repeat(depth);
+        out.push_str(&format!(
+            "{indent}- **{}** — {}\n",
+            agent.name, agent.description
+        ));
+
+        let targets = agent
+            .transfer_targets()
+            .iter()
+            .map(|target| target.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !targets.is_empty() {
+            out.push_str(&format!("{indent}  transfer: `{targets}`\n"));
+        }
+
+        for child in agent.sub_agents() {
+            walk(child, depth + 1, out);
+        }
+    }
+
+    let mut out = String::from("# Agents\n\n");
+    walk(root, 0, &mut out);
+    out
+}
+
+fn tools_markdown(app: &App) -> String {
+    let mut names = app.agents.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+
+    let mut out = String::from("# Tools\n\n");
+    for name in names {
+        let Some(agent) = app.agents.get(&name) else {
+            continue;
+        };
+        out.push_str(&format!("## {name}\n\n"));
+
+        let mut tools = agent.toolbox.keys().cloned().collect::<Vec<_>>();
+        tools.sort();
+        for tool_name in tools {
+            let description = agent
+                .toolbox
+                .get(&tool_name)
+                .map(|tool| tool.description())
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "- `{tool_name}` — {}\n",
+                description.replace('\n', " ")
+            ));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn print_history(context: &ExecutionContext, limit: usize) {
+    let events = &context.session.events;
+    let start = events.len().saturating_sub(limit);
+    if start == events.len() {
+        println!("(no history)");
+        return;
+    }
+
+    for event in &events[start..] {
+        println!("\n[{}]", event.author);
+        for item in &event.content {
+            match item {
+                ContentItem::Message(message) => {
+                    println!("{}: {}", message.role, preview(&message.content, 500));
+                }
+                ContentItem::ToolCall(call) => {
+                    println!("tool_call {} {}", call.name, call.arguments);
+                }
+                ContentItem::ToolResult(result) => {
+                    let status = match result.status {
+                        ToolResultStatus::Success => "ok",
+                        ToolResultStatus::Error => "error",
+                    };
+                    println!(
+                        "tool_result {} ({status}): {}",
+                        result.name,
+                        preview(&result.content, 200)
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn preview(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    let mut out = text.chars().take(max_chars).collect::<String>();
+    if count > max_chars {
+        out.push('…');
+    }
+    out.replace('\n', " ")
 }

@@ -12,6 +12,7 @@ use serde::Deserialize;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_max_level(tracing::Level::WARN)
         .init();
 
     let server = WikiServer::new();
